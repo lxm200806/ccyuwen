@@ -1,0 +1,241 @@
+/**
+ * 语文培优默写样式
+ * @module css/app
+ * @author ccyuwen
+ * @version 1.0.0
+ * @created 2026-09-02
+ */
+
+:root {
+	--paper: #f4ead6;
+	--ink: #2b2118;
+	--muted: #7a6856;
+	--red: #b23a2f;
+	--green: #2f6b4f;
+	--card: #fffaf1;
+	--line: #e0d2b8;
+}
+
+* {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	margin: 0;
+	min-height: 100%;
+	background: var(--paper);
+	color: var(--ink);
+	font-family: "Source Han Serif SC", "Songti SC", "SimSun", serif;
+}
+
+body {
+	padding-bottom: 76px;
+}
+
+#app {
+	max-width: 760px;
+	margin: 0 auto;
+	padding: 16px;
+}
+
+.topbar h1 {
+	margin: 0;
+	font-size: 28px;
+	letter-spacing: 0.12em;
+}
+
+.topbar p {
+	margin: 6px 0 18px;
+	color: var(--muted);
+	font-size: 14px;
+}
+
+.card {
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: 16px;
+	padding: 18px;
+	margin-bottom: 14px;
+}
+
+.prompt-tag,
+.lib-meta,
+.drill-meta,
+.card-progress {
+	color: var(--muted);
+	font-size: 13px;
+}
+
+#prompt-text,
+.lib-prompt {
+	font-size: 26px;
+	line-height: 1.5;
+	margin: 10px 0;
+}
+
+textarea,
+input,
+select {
+	width: 100%;
+	padding: 10px 12px;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	background: #fff;
+	color: var(--ink);
+	font-size: 18px;
+	font-family: inherit;
+}
+
+textarea {
+	min-height: 120px;
+	resize: vertical;
+}
+
+.row {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 10px;
+	margin-bottom: 10px;
+}
+
+.actions,
+.lib-ops,
+.nav {
+	display: flex;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+button {
+	min-height: 44px;
+	padding: 8px 14px;
+	border: 0;
+	border-radius: 999px;
+	background: var(--ink);
+	color: #fff;
+	font-size: 16px;
+	cursor: pointer;
+}
+
+button[data-del],
+.ghost {
+	background: transparent;
+	color: var(--ink);
+	border: 1px solid var(--line);
+}
+
+#btn-submit {
+	background: var(--red);
+}
+
+.result-title {
+	font-size: 22px;
+	margin: 0 0 8px;
+}
+
+.result-title.q5 {
+	color: var(--green);
+}
+
+.result-title.q3,
+.result-title.q1 {
+	color: var(--red);
+}
+
+#result-diff .ok {
+	color: var(--green);
+}
+
+#result-diff .bad {
+	color: var(--red);
+	text-decoration: underline;
+}
+
+.stats {
+	display: grid;
+	grid-template-columns: repeat(3, 1fr);
+	gap: 10px;
+}
+
+.stat {
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	padding: 12px;
+	text-align: center;
+}
+
+.stat b {
+	display: block;
+	font-size: 28px;
+}
+
+.bar-row {
+	display: grid;
+	grid-template-columns: 130px 1fr 36px;
+	gap: 8px;
+	align-items: center;
+	margin: 8px 0;
+}
+
+.bar {
+	height: 10px;
+	background: #efe3cd;
+	border-radius: 99px;
+	overflow: hidden;
+}
+
+.bar i {
+	display: block;
+	height: 100%;
+	background: var(--red);
+}
+
+.lib-card {
+	border-bottom: 1px solid var(--line);
+	padding: 12px 0;
+}
+
+.lib-answer {
+	margin: 0;
+	color: var(--muted);
+}
+
+.nav {
+	position: fixed;
+	right: 0;
+	bottom: 0;
+	left: 0;
+	justify-content: center;
+	padding: 10px;
+	background: rgba(244, 234, 214, 0.94);
+	border-top: 1px solid var(--line);
+}
+
+.nav button {
+	background: #efe3cd;
+	color: var(--ink);
+}
+
+.nav button.is-on {
+	background: var(--ink);
+	color: #fff;
+}
+
+@media print {
+	.nav,
+	.topbar p,
+	.actions,
+	#answer-input,
+	#result-box,
+	[data-page="library"],
+	[data-page="import"],
+	[data-page="progress"] {
+		display: none !important;
+	}
+
+	body {
+		background: #fff;
+	}
+}

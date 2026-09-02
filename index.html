@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>语文培优默写</title>
+	<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+	<div id="app">
+		<header class="topbar">
+			<h1>语文培优</h1>
+			<p>按级别整理知识点，用记忆曲线默写。</p>
+		</header>
+
+		<main>
+			<section class="tab-page" data-page="drill">
+				<div class="card">
+					<div class="drill-meta" id="drill-meta">今日 0 张</div>
+					<div class="card-progress" id="card-progress"></div>
+					<div class="prompt-tag" id="prompt-tag"></div>
+					<h2 id="prompt-text">加载中…</h2>
+					<label for="answer-input">默写答案</label>
+					<textarea id="answer-input" placeholder="写在这里，Ctrl+Enter 提交"></textarea>
+					<div class="actions" id="drill-actions">
+						<button type="button" id="btn-submit">提交</button>
+						<button type="button" class="ghost" id="btn-reveal">不会，看答案</button>
+						<button type="button" class="ghost" id="btn-speak">听写朗读</button>
+						<button type="button" class="ghost" id="btn-print">打印今日</button>
+					</div>
+				</div>
+				<div class="card" id="result-box" hidden>
+					<h3 class="result-title" id="result-title"></h3>
+					<p>标准答案：<span id="result-answer"></span></p>
+					<p>对照：<span id="result-diff"></span></p>
+					<button type="button" id="btn-next">下一题</button>
+				</div>
+			</section>
+
+			<section class="tab-page" data-page="library" hidden>
+				<div class="card">
+					<h2>知识点</h2>
+					<div class="row">
+						<label>
+							类型
+							<select id="filter-kind">
+								<option value="">全部</option>
+								<option value="poem">古诗</option>
+								<option value="idiom">成语</option>
+								<option value="zi">易错字</option>
+							</select>
+						</label>
+						<label>
+							级别
+							<select id="filter-level">
+								<option value="">全部</option>
+								<option value="L1">L1 课内必背</option>
+								<option value="L2">L2 课内拓展</option>
+								<option value="L3">L3 小升初高频</option>
+								<option value="L4">L4 竞赛超纲</option>
+							</select>
+						</label>
+					</div>
+					<p id="lib-count"></p>
+					<div id="lib-list"></div>
+				</div>
+				<div class="card">
+					<h2>新增 / 编辑</h2>
+					<input id="edit-id" type="hidden">
+					<div class="row">
+						<label>
+							类型
+							<select id="edit-kind">
+								<option value="poem">古诗</option>
+								<option value="idiom">成语</option>
+								<option value="zi">易错字</option>
+							</select>
+						</label>
+						<label>
+							级别
+							<select id="edit-level">
+								<option value="L1">L1 课内必背</option>
+								<option value="L2">L2 课内拓展</option>
+								<option value="L3">L3 小升初高频</option>
+								<option value="L4">L4 竞赛超纲</option>
+							</select>
+						</label>
+					</div>
+					<label for="edit-prompt">提示（孩子看到的题目）</label>
+					<input id="edit-prompt" type="text">
+					<label for="edit-answer">标准答案</label>
+					<textarea id="edit-answer"></textarea>
+					<label for="edit-tags">标签</label>
+					<input id="edit-tags" type="text" placeholder="古诗;李白">
+					<label for="edit-source">出处</label>
+					<input id="edit-source" type="text" placeholder="部编六上 / 2024小升初">
+					<button type="button" id="btn-add">保存知识点</button>
+				</div>
+			</section>
+
+			<section class="tab-page" data-page="progress" hidden>
+				<div class="stats">
+					<div class="stat"><b id="stat-total">0</b>词库</div>
+					<div class="stat"><b id="stat-due">0</b>今日到期</div>
+					<div class="stat"><b id="stat-fresh">0</b>未学</div>
+					<div class="stat"><b id="stat-mastered">0</b>已掌握</div>
+					<div class="stat"><b id="stat-weak">0</b>薄弱</div>
+				</div>
+				<div class="card">
+					<h2>级别分布</h2>
+					<div id="level-bars"></div>
+				</div>
+			</section>
+
+			<section class="tab-page" data-page="import" hidden>
+				<div class="card">
+					<h2>导入教材整理结果</h2>
+					<p>把从试卷、教辅里摘出的知识点贴进来。支持 JSON 数组，或 CSV（表头：kind,level,prompt,answer,tags,source）。样例见 raw/示例导入.csv。</p>
+					<label for="import-text">导入文本</label>
+					<textarea id="import-text" placeholder='[{"kind":"poem","level":"L3","prompt":"默写《题西林壁》","answer":"横看成岭侧成峰……"}]'></textarea>
+					<div class="actions">
+						<button type="button" id="btn-import">导入</button>
+						<button type="button" class="ghost" id="btn-export">导出备份</button>
+					</div>
+				</div>
+			</section>
+		</main>
+
+		<nav class="nav">
+			<button type="button" data-tab="drill">默写</button>
+			<button type="button" data-tab="library">词库</button>
+			<button type="button" data-tab="progress">进度</button>
+			<button type="button" data-tab="import">导入</button>
+		</nav>
+	</div>
+
+	<script src="js/sm2.js"></script>
+	<script src="js/grade.js"></script>
+	<script src="js/seed.js"></script>
+	<script src="js/store.js"></script>
+	<script src="js/app.js"></script>
+</body>
+</html>
