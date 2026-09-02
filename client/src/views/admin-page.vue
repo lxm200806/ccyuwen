@@ -1,40 +1,23 @@
 <template>
 	<div>
 		<section class="card">
-			<h2>上传原始资源</h2>
-			<p class="muted">官方文件进 official 目录，仅管理员。抽取前只存档。</p>
-			<div class="row">
-				<label>
-					范围
-					<select v-model="scope">
-						<option value="official">官方</option>
-						<option value="user">当前用户</option>
-					</select>
-				</label>
-				<label>
-					文件
-					<input type="file" @change="onFile">
-				</label>
-			</div>
-			<button type="button" @click="upload">上传</button>
+			<h2>抽取到草稿库</h2>
+			<p class="muted">可先在「原始资料」里点「用作抽取」，把资源 ID 带到这里。</p>
+			<label for="resource-id">关联资源 ID（可选）</label>
+			<input id="resource-id" v-model="resourceId" placeholder="上传后的 id">
+			<label for="import-text">CSV 或 JSON</label>
+			<textarea id="import-text" v-model="importText" placeholder='kind,level,grade,prompt,answer,tags,source'></textarea>
+			<button type="button" @click="importDrafts">写入草稿</button>
 			<p v-if="message" class="muted">{{ message }}</p>
 			<p v-if="error" class="error">{{ error }}</p>
 		</section>
 
 		<section class="card">
-			<h2>抽取到草稿库</h2>
-			<label for="resource-id">关联资源 ID（可选）</label>
-			<input id="resource-id" v-model="resourceId" placeholder="上传后的 id">
-			<label for="import-text">CSV 或 JSON</label>
-			<textarea id="import-text" v-model="importText" placeholder='kind,level,prompt,answer,tags,source'></textarea>
-			<button type="button" @click="importDrafts">写入草稿</button>
-		</section>
-
-		<section class="card">
 			<h2>草稿审核</h2>
 			<div v-if="drafts.length === 0" class="muted">暂无待审草稿</div>
+			<p v-else class="muted">待审 {{ total }} 条</p>
 			<article v-for="item in drafts" :key="item.id" class="lib-item">
-				<p><b>#{{ item.id }}</b> {{ item.kind }} / {{ item.level }}</p>
+				<p><b>#{{ item.id }}</b> {{ item.grade || '未分年级' }} · {{ item.kind }} / {{ item.level }}</p>
 				<p>{{ item.prompt }}</p>
 				<p class="muted">{{ item.answer }}</p>
 				<button type="button" @click="publish(item.id)">发布</button>
@@ -45,41 +28,28 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { request } from '../api.js'
 
-const scope = ref('official')
-const file = ref(null)
+const route = useRoute()
 const resourceId = ref('')
 const importText = ref('')
 const drafts = ref([])
+const total = ref(0)
 const message = ref('')
 const error = ref('')
 
-function onFile(event) {
-	file.value = event.target.files && event.target.files[0] ? event.target.files[0] : null
-}
-
-async function upload() {
-	error.value = ''
-	if (!file.value) {
-		error.value = '请选择文件'
-		return
-	}
-	const body = new FormData()
-	body.append('scope', scope.value)
-	body.append('file', file.value)
-	try {
-		const saved = await request('/resources', { method: 'POST', body })
-		message.value = '已保存 #' + saved.id + ' → ' + saved.path
-		resourceId.value = String(saved.id)
-	} catch (err) {
-		error.value = err.message
+function applyResourceQuery() {
+	if (route.query.resourceId) {
+		resourceId.value = String(route.query.resourceId)
 	}
 }
 
 async function loadDrafts() {
-	drafts.value = await request('/drafts?status=draft')
+	const data = await request('/drafts?status=draft')
+	drafts.value = data.items || []
+	total.value = data.total || 0
 }
 
 async function importDrafts() {
@@ -119,5 +89,10 @@ async function discard(id) {
 	await loadDrafts()
 }
 
-onMounted(loadDrafts)
+watch(() => route.query.resourceId, applyResourceQuery)
+
+onMounted(() => {
+	applyResourceQuery()
+	loadDrafts()
+})
 </script>

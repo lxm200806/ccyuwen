@@ -5,7 +5,9 @@
 		<table>
 			<thead>
 				<tr>
+					<th>年级</th>
 					<th>知识点</th>
+					<th>来源</th>
 					<th>学习</th>
 					<th>复习</th>
 					<th>错误</th>
@@ -15,7 +17,9 @@
 			</thead>
 			<tbody>
 				<tr v-for="item in items" :key="item.id">
+					<td>{{ item.grade || '未分年级' }}</td>
 					<td>{{ item.prompt }}</td>
+					<td>{{ item.source }}</td>
 					<td>{{ item.study_count }}</td>
 					<td>{{ item.review_count }}</td>
 					<td>{{ item.error_count }}</td>

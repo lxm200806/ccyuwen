@@ -2,7 +2,11 @@
 	<section class="card">
 		<p class="muted">{{ meta }}</p>
 		<template v-if="card">
-			<p class="muted">{{ card.level }} · {{ card.kind }} · {{ index + 1 }} / {{ queue.length }}</p>
+			<p class="muted">{{ card.grade || '未分年级' }} · {{ levelLabel(card.level) }} · {{ kindLabel(card.kind) }} · 第 {{ card.taskIndex || index + 1 }} / {{ card.taskCount || queue.length }} 张学习卡</p>
+			<p v-if="card.groupSize > 1" class="muted">本卡 {{ card.groupIndex }} / {{ card.groupSize }} · {{ card.groupEnergy || 0 }} 能</p>
+			<p v-if="card.parts > 1" class="muted">大卡拆天：{{ card.part }} / {{ card.parts }}</p>
+			<p class="muted">知识点 {{ index + 1 }} / {{ queue.length }} · 本条 {{ card.energy || 0 }} 能</p>
+			<p v-if="card.source" class="muted">{{ card.source }}</p>
 			<h2>{{ card.prompt }}</h2>
 			<template v-if="!result">
 				<label for="answer">默写答案</label>
@@ -36,6 +40,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { request } from '../api.js'
+import { kindLabel, levelLabel } from '../catalog.js'
 
 const route = useRoute()
 const queue = ref([])
@@ -53,7 +58,7 @@ async function loadToday() {
 	index.value = 0
 	result.value = null
 	answer.value = ''
-	meta.value = '今日 ' + data.items.length + ' 张 · 到期 ' + data.due + ' · 未学 ' + data.fresh
+	meta.value = '今日新学 ' + (data.newEnergy || 0) + '/' + (data.newBudget || 30) + ' 能 · 复习 ' + (data.reviewEnergy || 0) + '/' + (data.reviewBudget || 30) + ' 能 · ' + (data.tasks || 0) + ' 张学习卡 / ' + (data.cards || data.items.length) + ' 个知识点'
 }
 
 async function submit(reveal) {

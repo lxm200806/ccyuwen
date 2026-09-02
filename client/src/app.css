@@ -86,6 +86,29 @@ button.ghost,
 	background: var(--red);
 }
 
+button.ghost.danger {
+	background: transparent;
+	color: var(--red);
+	border-color: var(--red);
+}
+
+.course-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: center;
+	margin-top: 8px;
+}
+
+.course-actions a {
+	min-height: 40px;
+	padding: 8px 14px;
+	border-radius: 999px;
+	text-decoration: none;
+	border: 1px solid var(--line);
+	color: var(--ink);
+}
+
 .card {
 	background: var(--card);
 	border: 1px solid var(--line);
@@ -117,6 +140,18 @@ textarea {
 	min-height: 120px;
 }
 
+.original-preview {
+	max-height: 280px;
+	overflow: auto;
+	padding: 12px;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	background: #fff;
+	white-space: pre-wrap;
+	font-size: 14px;
+	line-height: 1.6;
+}
+
 .row {
 	display: grid;
 	grid-template-columns: 1fr 1fr;
@@ -137,6 +172,35 @@ textarea {
 	color: var(--green);
 }
 
+.sync-tag {
+	display: inline-block;
+	margin-left: 8px;
+	padding: 2px 8px;
+	border-radius: 999px;
+	font-size: 12px;
+	vertical-align: middle;
+}
+
+.sync-tag.synced {
+	background: #e7f3ec;
+	color: var(--green);
+}
+
+.sync-tag.outdated {
+	background: #fdecea;
+	color: var(--red);
+}
+
+.sync-tag.pending {
+	background: #efe3cd;
+	color: var(--ink);
+}
+
+h3 {
+	margin: 16px 0 8px;
+	font-size: 16px;
+}
+
 .bad {
 	color: var(--red);
 	text-decoration: underline;
@@ -153,6 +217,24 @@ td {
 	border-bottom: 1px solid var(--line);
 	padding: 8px 4px;
 	text-align: left;
+}
+
+.plan-row {
+	cursor: pointer;
+}
+
+.plan-row:hover,
+.plan-row.open {
+	background: #efe3cd;
+}
+
+.plan-detail td {
+	background: #fff;
+	padding: 8px 8px 12px;
+}
+
+.plan-detail p {
+	margin: 6px 0;
 }
 
 .stats {
@@ -190,6 +272,25 @@ td {
 
 .checks input {
 	width: auto;
+}
+
+.point-group {
+	margin: 14px 0 0;
+	padding: 12px 12px 4px;
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	background: #fff;
+}
+
+.point-group h3 {
+	margin: 0 0 4px;
+	font-size: 16px;
+}
+
+.point-group article {
+	margin-top: 10px;
+	padding-top: 10px;
+	border-top: 1px solid var(--line);
 }
 
 @media (max-width: 640px) {

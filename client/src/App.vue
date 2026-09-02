@@ -7,8 +7,9 @@
 		<nav v-if="user" class="nav">
 			<router-link to="/courses">课程</router-link>
 			<router-link to="/library">组课</router-link>
+			<router-link to="/points">知识点</router-link>
 			<router-link to="/coverage">覆盖</router-link>
-			<router-link v-if="user.role === 'admin'" to="/points">知识点</router-link>
+			<router-link v-if="user.role === 'admin'" to="/materials">原始资料</router-link>
 			<router-link v-if="user.role === 'admin'" to="/admin">审核</router-link>
 		</nav>
 		<router-view />

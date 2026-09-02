@@ -15,7 +15,22 @@
 				</thead>
 				<tbody>
 					<tr v-for="row in data.byKind || []" :key="row.kind">
-						<td>{{ row.kind }}</td>
+						<td>{{ kindLabel(row.kind) }}</td>
+						<td>{{ row.total }}</td>
+						<td>{{ row.in_course }}</td>
+					</tr>
+				</tbody>
+			</table>
+		</section>
+		<section class="card">
+			<h2>按年级覆盖</h2>
+			<table>
+				<thead>
+					<tr><th>年级</th><th>总量</th><th>已进课程</th></tr>
+				</thead>
+				<tbody>
+					<tr v-for="row in data.byGrade || []" :key="row.grade">
+						<td>{{ row.grade }}</td>
 						<td>{{ row.total }}</td>
 						<td>{{ row.in_course }}</td>
 					</tr>
@@ -28,6 +43,7 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import { request } from '../api.js'
+import { kindLabel } from '../catalog.js'
 
 const data = ref({})
 const error = ref('')

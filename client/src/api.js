@@ -54,8 +54,8 @@ export async function request(path, options = {}) {
 	})
 	if (response.status === 401) {
 		clearSession()
-		if (path !== '/login') {
-			window.location.hash = '#/login'
+		if (path !== '/login' && window.location.pathname !== '/login') {
+			window.location.assign('/login')
 		}
 	}
 	if (!response.ok) {

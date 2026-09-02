@@ -6,7 +6,8 @@ import psycopg
 from psycopg.rows import dict_row
 
 from .auth import hash_password
-from .seed_data import SEED_POINTS
+from .cards import KINDS, LEVELS, decode_filters, encode_filters, fill_group_fields
+from .materials import sync_all_official
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
@@ -28,6 +29,7 @@ CREATE TABLE IF NOT EXISTS resources (
     path TEXT NOT NULL,
     filename TEXT NOT NULL,
     mime TEXT,
+    slug TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'stored' CHECK (status IN ('stored', 'extracted')),
     uploaded_by INTEGER REFERENCES users(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -37,12 +39,16 @@ CREATE TABLE IF NOT EXISTS knowledge_draft (
     id SERIAL PRIMARY KEY,
     kind TEXT NOT NULL,
     level TEXT NOT NULL,
+    grade TEXT NOT NULL DEFAULT '',
     prompt TEXT NOT NULL,
     answer TEXT NOT NULL,
     tags TEXT NOT NULL DEFAULT '',
     source TEXT NOT NULL DEFAULT '',
     source_resource_id INTEGER REFERENCES resources(id),
     created_by INTEGER REFERENCES users(id),
+    point_key TEXT NOT NULL DEFAULT '',
+    group_key TEXT NOT NULL DEFAULT '',
+    sub_group_key TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'discarded', 'published')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -51,12 +57,16 @@ CREATE TABLE IF NOT EXISTS knowledge_published (
     id SERIAL PRIMARY KEY,
     kind TEXT NOT NULL,
     level TEXT NOT NULL,
+    grade TEXT NOT NULL DEFAULT '',
     prompt TEXT NOT NULL,
     answer TEXT NOT NULL,
     tags TEXT NOT NULL DEFAULT '',
     source TEXT NOT NULL DEFAULT '',
     source_resource_id INTEGER,
     draft_id INTEGER,
+    point_key TEXT NOT NULL DEFAULT '',
+    group_key TEXT NOT NULL DEFAULT '',
+    sub_group_key TEXT NOT NULL DEFAULT '',
     embedding BYTEA,
     published_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -66,6 +76,11 @@ CREATE TABLE IF NOT EXISTS courses (
     user_id INTEGER NOT NULL REFERENCES users(id),
     name TEXT NOT NULL,
     note TEXT NOT NULL DEFAULT '',
+    kinds TEXT NOT NULL DEFAULT '',
+    levels TEXT NOT NULL DEFAULT '',
+    grades TEXT NOT NULL DEFAULT '',
+    new_energy INTEGER NOT NULL DEFAULT 30,
+    review_energy INTEGER NOT NULL DEFAULT 30,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -126,11 +141,103 @@ def init_db():
     with connect() as conn:
         with conn.cursor() as cur:
             cur.execute(SCHEMA_SQL)
+            _migrate(cur)
             _ensure_user(cur, "admin", "admin123", "admin")
             _ensure_user(cur, "kid", "kid123", "user")
-            _seed_published(cur)
+            _seed_official_packs(cur)
             _seed_default_courses(cur)
         conn.commit()
+
+
+def _migrate(cur):
+    cur.execute("ALTER TABLE courses ADD COLUMN IF NOT EXISTS kinds TEXT NOT NULL DEFAULT ''")
+    cur.execute("ALTER TABLE courses ADD COLUMN IF NOT EXISTS levels TEXT NOT NULL DEFAULT ''")
+    cur.execute("ALTER TABLE courses ADD COLUMN IF NOT EXISTS grades TEXT NOT NULL DEFAULT ''")
+    cur.execute("ALTER TABLE courses ADD COLUMN IF NOT EXISTS new_energy INTEGER NOT NULL DEFAULT 30")
+    cur.execute("ALTER TABLE courses ADD COLUMN IF NOT EXISTS review_energy INTEGER NOT NULL DEFAULT 30")
+    cur.execute("ALTER TABLE knowledge_draft ADD COLUMN IF NOT EXISTS grade TEXT NOT NULL DEFAULT ''")
+    cur.execute("ALTER TABLE knowledge_published ADD COLUMN IF NOT EXISTS grade TEXT NOT NULL DEFAULT ''")
+    cur.execute("ALTER TABLE knowledge_draft ADD COLUMN IF NOT EXISTS point_key TEXT NOT NULL DEFAULT ''")
+    cur.execute("ALTER TABLE knowledge_published ADD COLUMN IF NOT EXISTS point_key TEXT NOT NULL DEFAULT ''")
+    cur.execute("ALTER TABLE knowledge_draft ADD COLUMN IF NOT EXISTS group_key TEXT NOT NULL DEFAULT ''")
+    cur.execute("ALTER TABLE knowledge_published ADD COLUMN IF NOT EXISTS group_key TEXT NOT NULL DEFAULT ''")
+    cur.execute("ALTER TABLE knowledge_draft ADD COLUMN IF NOT EXISTS sub_group_key TEXT NOT NULL DEFAULT ''")
+    cur.execute("ALTER TABLE knowledge_published ADD COLUMN IF NOT EXISTS sub_group_key TEXT NOT NULL DEFAULT ''")
+    cur.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS slug TEXT NOT NULL DEFAULT ''")
+    cur.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS synced_version INTEGER NOT NULL DEFAULT 0")
+    cur.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS synced_hash TEXT NOT NULL DEFAULT ''")
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS knowledge_published_point_key_uidx
+        ON knowledge_published (point_key)
+        WHERE point_key <> ''
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS knowledge_published_group_key_idx
+        ON knowledge_published (group_key)
+        """
+    )
+    cur.execute(
+        """
+        UPDATE courses
+        SET kinds = %s, levels = %s
+        WHERE name = %s AND (kinds = '' OR kinds IS NULL)
+        """,
+        (encode_filters(KINDS, KINDS), encode_filters(LEVELS, LEVELS), "默认课程"),
+    )
+    cur.execute(
+        "UPDATE courses SET kinds = %s WHERE name = %s",
+        (encode_filters(KINDS, KINDS), "默认课程"),
+    )
+    cur.execute(
+        """
+        UPDATE knowledge_published
+        SET kind = 'wenyan'
+        WHERE kind = 'poem' AND tags LIKE '文言文%'
+        """
+    )
+    cur.execute("SELECT id, kinds FROM courses WHERE name <> %s", ("默认课程",))
+    for row in cur.fetchall():
+        current = decode_filters(row["kinds"], KINDS)
+        if "poem" in current and "wenyan" not in current:
+            idx = current.index("poem")
+            current.insert(idx + 1, "wenyan")
+            cur.execute(
+                "UPDATE courses SET kinds = %s WHERE id = %s",
+                (encode_filters(current, KINDS), row["id"]),
+            )
+    _backfill_group_keys(cur)
+
+
+def _backfill_group_keys(cur):
+    cur.execute(
+        """
+        SELECT id, kind, level, grade, prompt, answer, tags, source, point_key, group_key, sub_group_key
+        FROM knowledge_published
+        """
+    )
+    for row in cur.fetchall():
+        filled = fill_group_fields(
+            {
+                "key": row.get("point_key") or "",
+                "kind": row["kind"],
+                "level": row["level"],
+                "grade": row.get("grade") or "",
+                "prompt": row["prompt"],
+                "answer": row["answer"],
+                "tags": row.get("tags") or "",
+                "source": row.get("source") or "",
+            }
+        )
+        if (row.get("group_key") or "") != filled["group_key"] or (row.get("sub_group_key") or "") != filled[
+            "sub_group_key"
+        ]:
+            cur.execute(
+                "UPDATE knowledge_published SET group_key = %s, sub_group_key = %s WHERE id = %s",
+                (filled["group_key"], filled["sub_group_key"], row["id"]),
+            )
 
 
 def _ensure_user(cur, name, password, role):
@@ -143,18 +250,8 @@ def _ensure_user(cur, name, password, role):
     )
 
 
-def _seed_published(cur):
-    cur.execute("SELECT COUNT(*) AS n FROM knowledge_published")
-    if cur.fetchone()["n"] > 0:
-        return
-    for point in SEED_POINTS:
-        cur.execute(
-            """
-            INSERT INTO knowledge_published (kind, level, prompt, answer, tags, source)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            """,
-            (point["kind"], point["level"], point["prompt"], point["answer"], point["tags"], point["source"]),
-        )
+def _seed_official_packs(cur):
+    sync_all_official(cur, force=False)
 
 
 def _seed_default_courses(cur):
@@ -169,8 +266,19 @@ def _seed_default_courses(cur):
         if cur.fetchone():
             continue
         cur.execute(
-            "INSERT INTO courses (user_id, name, note) VALUES (%s, %s, %s) RETURNING id",
-            (user["id"], "默认课程", "系统预置，含已发布知识点"),
+            """
+            INSERT INTO courses (user_id, name, note, kinds, levels, grades)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                user["id"],
+                "默认课程",
+                "系统预置，含已发布知识点",
+                encode_filters(KINDS, KINDS),
+                encode_filters(LEVELS, LEVELS),
+                "",
+            ),
         )
         course_id = cur.fetchone()["id"]
         for index, point in enumerate(points):

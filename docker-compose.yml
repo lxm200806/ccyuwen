@@ -5,8 +5,6 @@ services:
       POSTGRES_USER: ccyuwen
       POSTGRES_PASSWORD: ccyuwen
       POSTGRES_DB: ccyuwen
-    ports:
-      - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -21,8 +19,10 @@ services:
       DATABASE_URL: postgresql://ccyuwen:ccyuwen@db:5432/ccyuwen
       JWT_SECRET: ccyuwen-dev
       DATA_ROOT: /app/data
+      RAW_ROOT: /app/raw
     volumes:
       - ./server/data:/app/data
+      - ./raw:/app/raw
     ports:
       - "8000:8000"
     depends_on:
