@@ -1,4 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+client/dist/
 .DS_Store
 Thumbs.db
 *.log
 data.local.json
+server/data/official/*
+server/data/users/*
+!server/data/official/.gitkeep
+!server/data/users/.gitkeep
