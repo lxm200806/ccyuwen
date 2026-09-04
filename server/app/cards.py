@@ -51,6 +51,29 @@ def decode_filters(text, allowed):
     return [item for item in str(text or "").split(",") if item in allowed]
 
 
+# None = no filter; 0 = only rows with source_resource_id IS NULL; >0 = that resource.
+UNLINKED_RESOURCE_TOKENS = {"0", "unlinked", "none"}
+ALL_RESOURCE_TOKENS = {"", "all", "*", "undefined", "null"}
+
+
+def parse_resource_filter(resource_id=None, unlinked=False):
+    if unlinked:
+        return 0
+    text = "" if resource_id is None else str(resource_id).strip()
+    lowered = text.lower()
+    if lowered in ALL_RESOURCE_TOKENS:
+        return None
+    if lowered in UNLINKED_RESOURCE_TOKENS:
+        return 0
+    try:
+        value = int(text)
+    except (TypeError, ValueError):
+        return None
+    if value < 0:
+        return None
+    return value
+
+
 def page_args(limit, offset):
     try:
         safe_limit = int(limit)

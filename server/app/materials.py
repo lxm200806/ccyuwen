@@ -507,6 +507,12 @@ def decorate_resource(row, status_by_slug=None):
         data["syncState"] = info["syncState"]
         data["pointCount"] = info["pointCount"]
         data["title"] = info["title"]
+    elif data["isPack"] and spec:
+        data["version"] = int(data.get("synced_version") or 0)
+        data["syncedVersion"] = int(data.get("synced_version") or 0)
+        data["syncState"] = ""
+        data["pointCount"] = 0
+        data["title"] = spec["title"]
     else:
         data["version"] = int(data.get("synced_version") or 0)
         data["syncedVersion"] = int(data.get("synced_version") or 0)

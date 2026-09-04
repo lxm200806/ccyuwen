@@ -77,6 +77,58 @@ class ApiTests(unittest.TestCase):
         response = self.client.get("/api/me")
         self.assertEqual(response.status_code, 401)
 
+    def test_student_library_matches_default_course(self):
+        with connect() as conn:
+            published = conn.execute("SELECT COUNT(*) AS n FROM knowledge_published").fetchone()["n"]
+            unlinked_n = conn.execute(
+                "SELECT COUNT(*) AS n FROM knowledge_published WHERE source_resource_id IS NULL"
+            ).fetchone()["n"]
+        self.assertGreater(published, 0)
+
+        courses = self.client.get("/api/courses", headers=self.kid)
+        self.assertEqual(courses.status_code, 200, courses.text)
+        default = next((row for row in courses.json() if row.get("name") == "默认课程"), None)
+        self.assertIsNotNone(default)
+        self.assertGreater(default["itemCount"], 0)
+        self.assertLessEqual(default["itemCount"], published)
+
+        catalog = self.client.get("/api/library?limit=100&offset=0&answers=1", headers=self.kid)
+        self.assertEqual(catalog.status_code, 200, catalog.text)
+        self.assertEqual(catalog.json()["total"], published)
+        self.assertTrue(catalog.json()["items"])
+        self.assertTrue(all(item.get("answer") for item in catalog.json()["items"]))
+
+        empty_param = self.client.get("/api/library?resourceId=&answers=1", headers=self.kid)
+        self.assertEqual(empty_param.status_code, 200, empty_param.text)
+        self.assertEqual(empty_param.json()["total"], published)
+
+        unlinked = self.client.get("/api/library?resourceId=0&answers=1", headers=self.kid)
+        self.assertEqual(unlinked.status_code, 200, unlinked.text)
+        self.assertEqual(unlinked.json()["total"], unlinked_n)
+
+        named = self.client.get("/api/library?resourceId=unlinked&answers=1", headers=self.kid)
+        self.assertEqual(named.status_code, 200, named.text)
+        self.assertEqual(named.json()["total"], unlinked_n)
+
+        extra = self.client.post(
+            "/api/courses",
+            json={"name": "接口课-cov-" + self.marker, "note": "", "kinds": [], "levels": [], "grades": []},
+            headers=self.kid,
+        )
+        self.assertEqual(extra.status_code, 200, extra.text)
+        self.assertEqual(extra.json()["itemCount"], published)
+
+        synced = self.client.post("/api/courses/" + str(default["id"]) + "/sync", headers=self.kid)
+        self.assertEqual(synced.status_code, 200, synced.text)
+        self.assertEqual(synced.json()["itemCount"], published)
+
+        coverage = self.client.get("/api/library/coverage", headers=self.kid)
+        self.assertEqual(coverage.status_code, 200, coverage.text)
+        self.assertEqual(coverage.json()["total"], published)
+        self.assertEqual(coverage.json()["inCourse"], published)
+        self.assertEqual(sum(row["total"] for row in coverage.json()["byKind"]), published)
+        self.assertEqual(sum(row["total"] for row in coverage.json()["byGrade"]), published)
+
     def test_kid_cannot_upload(self):
         response = self.client.post(
             "/api/resources",

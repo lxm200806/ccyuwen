@@ -29,8 +29,8 @@
 			<label>
 				原始资料
 				<select v-model="resourceId">
-					<option value="">全部</option>
-					<option value="0">未关联资料</option>
+					<option value="all">全部</option>
+					<option value="unlinked">未关联资料</option>
 					<option v-for="item in officialPacks" :key="item.id" :value="String(item.id)">{{ packLabel(item) }}</option>
 				</select>
 			</label>
@@ -42,8 +42,14 @@
 			</label>
 		</div>
 		<p class="muted">
-			共 {{ total }} 条，已显示 {{ points.length }} 条
-			<template v-if="byGroup"> · {{ groupedPoints.length }} 组</template>
+			<template v-if="loading">正在加载知识点…</template>
+			<template v-else>
+				共 {{ total }} 条，已显示 {{ points.length }} 条
+				<template v-if="byGroup"> · {{ groupedPoints.length }} 组</template>
+			</template>
+		</p>
+		<p v-if="!loading && !error && total === 0" class="muted">
+			{{ emptyHint }}
 		</p>
 		<p v-if="error" class="error">{{ error }}</p>
 		<p v-if="message" class="ok">{{ message }}</p>
@@ -129,8 +135,10 @@ const gradeOptions = GRADE_OPTIONS
 const kind = ref('')
 const level = ref('')
 const grade = ref('')
-const resourceId = ref('')
+const resourceId = ref('all')
 const byGroup = ref(false)
+const loading = ref(true)
+let loadTicket = 0
 const resources = ref([])
 const officialPacks = computed(() => {
 	return resources.value.filter((item) => item.isPack).slice().sort((left, right) => packOrder(left.slug) - packOrder(right.slug))
@@ -206,25 +214,60 @@ function libraryQuery(offset) {
 	if (grade.value) {
 		query.push('grade=' + encodeURIComponent(grade.value))
 	}
-	if (resourceId.value !== '') {
-		query.push('resourceId=' + encodeURIComponent(resourceId.value))
+	const resource = String(resourceId.value || 'all')
+	if (resource === 'unlinked') {
+		query.push('resourceId=unlinked')
+	} else if (/^[1-9]\d*$/.test(resource)) {
+		query.push('resourceId=' + resource)
 	}
 	query.push('answers=1')
 	return '?' + query.join('&')
 }
 
+const emptyHint = computed(() => {
+	if (resourceId.value === 'unlinked') {
+		return '没有未关联教材的知识点。系统预置词库都已挂到各册，请把「原始资料」改回「全部」。'
+	}
+	if (kind.value || level.value || grade.value || /^[1-9]\d*$/.test(String(resourceId.value || ''))) {
+		return '没有符合当前筛选的已发布知识点。可清空类型、级别、年级或册后再看。'
+	}
+	return '知识库还是空的。管理员可在「原始资料」同步教材，或在「审核」发布草稿。'
+})
+
 async function loadPoints() {
+	const ticket = ++loadTicket
 	error.value = ''
-	const data = await request('/library' + libraryQuery(0))
-	points.value = data.items || []
-	total.value = data.total || 0
+	loading.value = true
+	try {
+		const data = await request('/library' + libraryQuery(0))
+		if (ticket !== loadTicket) {
+			return
+		}
+		points.value = data.items || []
+		total.value = Number(data.total) || 0
+	} catch (err) {
+		if (ticket !== loadTicket) {
+			return
+		}
+		error.value = err.message
+		points.value = []
+		total.value = 0
+	} finally {
+		if (ticket === loadTicket) {
+			loading.value = false
+		}
+	}
 }
 
 async function loadMore() {
 	error.value = ''
-	const data = await request('/library' + libraryQuery(points.value.length))
-	points.value = points.value.concat(data.items || [])
-	total.value = data.total || total.value
+	try {
+		const data = await request('/library' + libraryQuery(points.value.length))
+		points.value = points.value.concat(data.items || [])
+		total.value = Number(data.total) || total.value
+	} catch (err) {
+		error.value = err.message
+	}
 }
 
 function startEdit(item) {
@@ -266,12 +309,19 @@ async function savePoint() {
 }
 
 watch([kind, level, grade, resourceId, byGroup], loadPoints)
-onMounted(async () => {
+
+async function loadResources() {
 	try {
 		resources.value = await request('/resources')
 	} catch (err) {
-		error.value = err.message
+		if (!error.value) {
+			error.value = err.message
+		}
 	}
-	await loadPoints()
+}
+
+onMounted(() => {
+	loadResources()
+	loadPoints()
 })
 </script>
