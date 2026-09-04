@@ -353,6 +353,92 @@ class ApiTests(unittest.TestCase):
         missing = self.client.get("/api/courses/" + str(course_id) + "/today", headers=self.kid)
         self.assertEqual(missing.status_code, 404)
 
+    def test_review_pref_and_today_summary_fields(self):
+        prompt = "看拼音写字：huì（摘要" + self.marker + "）"
+        imported = self.client.post(
+            "/api/drafts/import",
+            json={"text": "kind,level,grade,prompt,answer,tags,source\n" + csv_row("zi", "L4", prompt, "会")},
+            headers=self.admin,
+        )
+        self.assertEqual(imported.status_code, 200, imported.text)
+        draft_id = imported.json()["items"][0]["id"]
+        published = self.client.post("/api/drafts/" + str(draft_id) + "/publish", headers=self.admin)
+        self.assertEqual(published.status_code, 200, published.text)
+        point_id = published.json()["id"]
+
+        course = self.client.post(
+            "/api/courses",
+            json={
+                "name": "接口课-摘要-" + self.marker,
+                "note": "进度摘要",
+                "kinds": ["zi"],
+                "levels": ["L4"],
+                "grades": ["三年级上"],
+            },
+            headers=self.kid,
+        )
+        self.assertEqual(course.status_code, 200, course.text)
+        course_id = course.json()["id"]
+        self.assertFalse(course.json().get("reviewDefaultTest"))
+
+        today = self.client.get("/api/courses/" + str(course_id) + "/today", headers=self.kid)
+        self.assertEqual(today.status_code, 200, today.text)
+        payload = today.json()
+        self.assertIn("progress", payload)
+        self.assertIn(payload["progress"].get("status"), ("remaining", "idle", "done", "empty"))
+        self.assertFalse(payload.get("reviewDefaultTest"))
+        self.assertTrue(any(item["id"] == point_id for item in payload["items"]))
+
+        patched = self.client.patch(
+            "/api/courses/" + str(course_id),
+            json={"reviewDefaultTest": True},
+            headers=self.kid,
+        )
+        self.assertEqual(patched.status_code, 200, patched.text)
+        self.assertTrue(patched.json().get("reviewDefaultTest"))
+        self.assertIn("progress", patched.json())
+
+        listed = self.client.get("/api/courses", headers=self.kid)
+        row = next((item for item in listed.json() if item.get("id") == course_id), None)
+        self.assertIsNotNone(row)
+        self.assertTrue(row.get("reviewDefaultTest"))
+        self.assertIn("progress", row)
+        self.assertTrue(row["progress"].get("title"))
+
+        peek = self.client.post(
+            "/api/courses/" + str(course_id) + "/review",
+            json={"pointId": point_id, "answer": "", "reveal": True, "mode": "learn"},
+            headers=self.kid,
+        )
+        self.assertEqual(peek.status_code, 200, peek.text)
+        self.assertEqual(peek.json()["quality"], 3)
+        self.assertIn("feedback", peek.json())
+        self.assertIn("模糊", peek.json()["feedback"].get("hint") or "")
+
+        wrong = self.client.post(
+            "/api/courses/" + str(course_id) + "/review",
+            json={"pointId": point_id, "answer": "绘", "mode": "test"},
+            headers=self.kid,
+        )
+        self.assertEqual(wrong.status_code, 200, wrong.text)
+        self.assertFalse(wrong.json()["correct"])
+        self.assertTrue(wrong.json()["feedback"].get("wrongChars"))
+        self.assertIn("记下", wrong.json()["feedback"].get("title") or "")
+
+        stats = self.client.get("/api/courses/" + str(course_id) + "/stats", headers=self.kid)
+        self.assertEqual(stats.status_code, 200, stats.text)
+        self.assertGreaterEqual(stats.json()["today"]["todayPracticed"], 1)
+        self.assertIsNotNone(stats.json()["today"]["todayAccuracy"])
+        self.assertIn("items", stats.json())
+        self.assertIn("mastery", stats.json())
+        self.assertGreaterEqual(stats.json()["mastery"]["total"], 1)
+        self.assertTrue(stats.json().get("summary"))
+        self.assertTrue(stats.json().get("reviewDefaultTest"))
+
+        today_after = self.client.get("/api/courses/" + str(course_id) + "/today", headers=self.kid)
+        self.assertTrue(today_after.json().get("reviewDefaultTest"))
+        self.assertGreaterEqual(today_after.json()["progress"]["todayPracticed"], 1)
+
     def test_grade3_original_backup_and_sync(self):
         listed = self.client.get("/api/resources", headers=self.admin)
         self.assertEqual(listed.status_code, 200, listed.text)

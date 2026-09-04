@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS courses (
     grades TEXT NOT NULL DEFAULT '',
     new_energy INTEGER NOT NULL DEFAULT 30,
     review_energy INTEGER NOT NULL DEFAULT 30,
+    review_default_test BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -155,6 +156,7 @@ def _migrate(cur):
     cur.execute("ALTER TABLE courses ADD COLUMN IF NOT EXISTS grades TEXT NOT NULL DEFAULT ''")
     cur.execute("ALTER TABLE courses ADD COLUMN IF NOT EXISTS new_energy INTEGER NOT NULL DEFAULT 30")
     cur.execute("ALTER TABLE courses ADD COLUMN IF NOT EXISTS review_energy INTEGER NOT NULL DEFAULT 30")
+    cur.execute("ALTER TABLE courses ADD COLUMN IF NOT EXISTS review_default_test BOOLEAN NOT NULL DEFAULT FALSE")
     cur.execute("ALTER TABLE knowledge_draft ADD COLUMN IF NOT EXISTS grade TEXT NOT NULL DEFAULT ''")
     cur.execute("ALTER TABLE knowledge_published ADD COLUMN IF NOT EXISTS grade TEXT NOT NULL DEFAULT ''")
     cur.execute("ALTER TABLE knowledge_draft ADD COLUMN IF NOT EXISTS point_key TEXT NOT NULL DEFAULT ''")

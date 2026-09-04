@@ -34,9 +34,23 @@
 					</template>
 					· 每天新学 {{ item.newEnergy || 30 }} 能 / 复习 {{ item.reviewEnergy || 30 }} 能
 				</p>
+				<div class="today-status" :class="(item.progress && item.progress.status) || ''">
+					<p class="today-title">{{ progressTitle(item) }}</p>
+					<p v-if="progressCheer(item)" class="cheer">{{ progressCheer(item) }}</p>
+					<p v-if="item.progress && item.progress.summary" class="hint">{{ item.progress.summary }}</p>
+				</div>
 				<p v-if="item.pendingCount" class="banner">
 					词库有更新，本课还可补进 {{ item.pendingCount }} 条。点「同步新词」按原筛选加入。
 				</p>
+				<label class="pref-toggle">
+					<input
+						type="checkbox"
+						:checked="!!item.reviewDefaultTest"
+						:disabled="busy"
+						@change="toggleReviewPref(item, $event.target.checked)"
+					>
+					到期复习默认用测试模式
+				</label>
 				<div class="course-actions">
 					<router-link :to="'/courses/' + item.id + '/drill'">今日默写</router-link>
 					<router-link :to="'/courses/' + item.id + '/plan'">学习计划</router-link>
@@ -67,6 +81,31 @@ function kindNames(ids) {
 	return (ids || []).map(function (id) {
 		return KIND_LABEL[id] || id
 	}).join(' / ')
+}
+
+function progressTitle(item) {
+	const progress = item.progress || {}
+	if (progress.title) {
+		return progress.title
+	}
+	if (progress.status === 'done') {
+		return '今天练完了'
+	}
+	return '今天还没开始练'
+}
+
+function progressCheer(item) {
+	const progress = item.progress || {}
+	const parts = []
+	if (progress.todayStreak > 0) {
+		parts.push('连续正确 ' + progress.todayStreak)
+	}
+	if (progress.todayDoneCount > 0) {
+		parts.push('今日已完成 ' + progress.todayDoneCount + ' 条')
+	} else if (progress.todayPracticed > 0) {
+		parts.push('今日已练 ' + progress.todayPracticed + ' 条')
+	}
+	return parts.join(' · ')
 }
 
 const courses = ref([])
@@ -115,6 +154,27 @@ async function saveEdit(id) {
 		await loadCourses()
 	} catch (err) {
 		error.value = err.message
+	} finally {
+		busy.value = false
+	}
+}
+
+async function toggleReviewPref(item, checked) {
+	error.value = ''
+	message.value = ''
+	busy.value = true
+	try {
+		const result = await request('/courses/' + item.id, {
+			method: 'PATCH',
+			body: JSON.stringify({ reviewDefaultTest: !!checked })
+		})
+		item.reviewDefaultTest = !!result.reviewDefaultTest
+		message.value = result.reviewDefaultTest
+			? item.name + '：到期复习将默认用测试模式'
+			: item.name + '：已改回自动选择模式'
+	} catch (err) {
+		error.value = err.message
+		await loadCourses()
 	} finally {
 		busy.value = false
 	}

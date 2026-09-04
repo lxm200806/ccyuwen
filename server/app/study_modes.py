@@ -32,6 +32,20 @@ def default_study_mode(planned):
     return "learn"
 
 
+def has_review_work(planned):
+    groups = list((planned or {}).get("groups") or [])
+    if any(group.get("role") == "review" for group in groups):
+        return True
+    return int((planned or {}).get("reviewEnergy") or 0) > 0
+
+
+def resolve_default_mode(planned, review_default_test=False):
+    """家长勾选「到期复习默认用测试」时，只要还有复习卡就默认测试。"""
+    if review_default_test and has_review_work(planned):
+        return "test"
+    return default_study_mode(planned)
+
+
 def groups_for_mode(groups, mode):
     """测试优先只收复习卡；没有复习卡时回退到当日全部卡。学习/背诵用当日完整计划。"""
     mode = normalize_mode(mode)

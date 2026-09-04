@@ -17,11 +17,21 @@
 		</div>
 		<p v-if="loading" class="muted">正在准备今日默写…</p>
 		<template v-else>
-			<p class="muted">{{ meta }}</p>
-			<p class="hint">
-				「能」是今天的学习量：字 1、词语 2、成语 4，古诗 / 文言文按篇幅。每天先按<strong>复习能量</strong>收到期的学习卡，再按<strong>新学能量</strong>收还没学过的卡。一张<strong>学习卡</strong>是同一模块的几条知识点，捆在一起默写。
-			</p>
+			<div class="today-status" :class="progress.status">
+				<p class="today-title">{{ statusTitle }}</p>
+				<p class="hint">{{ statusHint }}</p>
+				<p v-if="cheerText" class="cheer">{{ cheerText }}</p>
+			</div>
 			<p class="hint">{{ modeHint }}</p>
+			<label class="pref-toggle">
+				<input
+					type="checkbox"
+					:checked="reviewDefaultTest"
+					:disabled="busy || prefBusy"
+					@change="toggleReviewPref($event.target.checked)"
+				>
+				到期复习默认用测试模式
+			</label>
 			<template v-if="card">
 				<p class="muted">
 					{{ card.grade || '未分年级' }} · {{ levelLabel(card.level) }} · {{ kindLabel(card.kind) }}
@@ -77,12 +87,12 @@
 					>不会，看答案</button>
 					<button class="ghost" type="button" :disabled="busy" @click="speak">听写朗读</button>
 				</template>
-				<div v-else>
-					<p :class="result.correct ? 'ok' : 'error'">
-						{{ resultLabel }}
-					</p>
+				<div v-else class="result-box">
+					<p class="result-title" :class="resultTone">{{ feedbackTitle }}</p>
+					<p class="hint">{{ feedbackHint }}</p>
+					<p v-if="wrongChars.length">不一样的字：<span class="bad">{{ wrongChars.join('、') }}</span></p>
 					<p>标准答案：{{ result.answer }}</p>
-					<p v-if="!result.revealed">
+					<p v-if="!result.revealed && result.chars && result.chars.length">
 						对照：
 						<span
 							v-for="(ch, i) in result.chars"
@@ -90,12 +100,13 @@
 							:class="ch.ok ? 'ok' : 'bad'"
 						>{{ ch.char }}</span>
 					</p>
+					<p class="muted">{{ feedbackNext }}</p>
 					<button type="button" @click="nextCard">下一题</button>
 				</div>
 			</template>
-			<div v-else-if="itemCount === 0" class="hint">
-				<p>这门课还没有知识点，所以没有今日默写。</p>
-				<p>
+			<div v-else-if="itemCount === 0" class="done-panel">
+				<p class="today-title">这门课还没有知识点</p>
+				<p class="hint">
 					请回
 					<router-link to="/courses">我的课程</router-link>
 					点「同步新词」，或去
@@ -103,14 +114,22 @@
 					按年级生成一份。
 				</p>
 			</div>
-			<div v-else class="hint">
-				<p>{{ emptyHint }}</p>
-				<p>
+			<div v-else class="done-panel" :class="progress.status">
+				<p class="today-title">{{ emptyTitle }}</p>
+				<p class="hint">{{ emptyHint }}</p>
+				<p v-if="cheerText" class="cheer">{{ cheerText }}</p>
+				<p class="hint">
 					明天再来，或打开
 					<router-link :to="'/courses/' + route.params.id + '/plan'">学习计划</router-link>
 					看后面几天。也可以换一个模式再试试。
 				</p>
 			</div>
+			<details class="energy-help">
+				<summary>「能」是什么？</summary>
+				<p>
+					「能」是今天的学习量：字 1、词语 2、成语 4，古诗 / 文言文按篇幅。每天先按复习能量收到期的学习卡，再按新学能量收还没学过的卡。一张学习卡是同一模块的几条知识点，捆在一起默写。
+				</p>
+			</details>
 		</template>
 		<p v-if="error" class="error">{{ error }}</p>
 	</section>
@@ -122,7 +141,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { request } from '../api.js'
 import { kindLabel, levelLabel } from '../catalog.js'
 
-const MODE_OPTIONS = [
+const FALLBACK_MODES = [
 	{ id: 'learn', label: '学习', hint: '先练会' },
 	{ id: 'test', label: '测试', hint: '考考你' },
 	{ id: 'recite', label: '背诵', hint: '读出来' }
@@ -134,15 +153,19 @@ const queue = ref([])
 const index = ref(0)
 const answer = ref('')
 const result = ref(null)
-const meta = ref('')
 const error = ref('')
 const loading = ref(true)
 const busy = ref(false)
+const prefBusy = ref(false)
 const itemCount = ref(0)
 const mode = ref('learn')
-const energyCharged = ref(true)
+const modeOptions = ref(FALLBACK_MODES)
+const progress = ref({})
+const reviewDefaultTest = ref(false)
+const sessionStreak = ref(0)
+const sessionDoneCount = ref(0)
+const sessionAttempts = ref(0)
 const revealedCount = ref(0)
-const modeOptions = MODE_OPTIONS
 
 const card = computed(() => queue.value[index.value] || null)
 const reciteLines = computed(() => {
@@ -163,11 +186,95 @@ const modeHint = computed(() => {
 		return '测试是正式默写：少提示、提交前不能看答案，对错按严格间隔记。优先做到期复习卡。'
 	}
 	if (mode.value === 'recite') {
-		return '背诵练听和读：可以逐行对照。不改间隔记忆，也不消耗今日新学 / 复习能量。'
+		return '背诵练听和读：可以逐行对照。不改下次出现的日子，也不消耗今日新学 / 复习能量。'
 	}
-	return '学习先练会：可以看出处，不会时可以看答案。看过答案记为「模糊」，比写错轻，不记 lapse。'
+	return '学习先练会：可以看出处，不会时可以看答案。看过答案记成「模糊」，比写错轻。'
 })
-const resultLabel = computed(() => {
+const displayStreak = computed(() => {
+	if (sessionAttempts.value > 0) {
+		return sessionStreak.value
+	}
+	return Number(progress.value.todayStreak) || 0
+})
+const displayDoneCount = computed(() => {
+	return (Number(progress.value.todayDoneCount) || 0) + sessionDoneCount.value
+})
+const cheerText = computed(() => {
+	const parts = []
+	if (displayStreak.value > 0) {
+		parts.push('连续正确 ' + displayStreak.value)
+	}
+	if (displayDoneCount.value > 0) {
+		parts.push('今日已完成 ' + displayDoneCount.value + ' 条')
+	}
+	return parts.join(' · ')
+})
+const statusTitle = computed(() => {
+	if (progress.value.title) {
+		return progress.value.title
+	}
+	return remainingFallbackTitle()
+})
+const statusHint = computed(() => {
+	return progress.value.hint || ''
+})
+const emptyTitle = computed(() => {
+	if (mode.value === 'test' && Number(progress.value.remainingNewEnergy) > 0) {
+		return '今天没有到期复习可测'
+	}
+	if (progress.value.status === 'done' || progress.value.todayDone) {
+		return '今天练完了'
+	}
+	return statusTitle.value || '今天的默写做完了'
+})
+const emptyHint = computed(() => {
+	if (mode.value === 'test' && Number(progress.value.remainingNewEnergy) > 0) {
+		return '可以切到「学习」练新卡，或明天再来测复习。'
+	}
+	if (mode.value === 'recite' && progress.value.status === 'remaining') {
+		return '今天没有可朗读的学习卡。'
+	}
+	if (progress.value.hint) {
+		return progress.value.hint
+	}
+	return '今天的默写做完了。新学和复习能量都已用完（或没有到期卡片）。'
+})
+const feedback = computed(() => (result.value && result.value.feedback) || {})
+const feedbackTitle = computed(() => feedback.value.title || legacyResultLabel())
+const feedbackHint = computed(() => feedback.value.hint || '')
+const feedbackNext = computed(() => feedback.value.next || '')
+const wrongChars = computed(() => {
+	if (result.value && result.value.revealed) {
+		return []
+	}
+	if (Array.isArray(feedback.value.wrongChars) && feedback.value.wrongChars.length) {
+		return feedback.value.wrongChars
+	}
+	return []
+})
+const resultTone = computed(() => {
+	if (!result.value) {
+		return ''
+	}
+	if (result.value.revealed) {
+		return 'warn'
+	}
+	return result.value.correct ? 'ok' : 'error'
+})
+
+function remainingFallbackTitle() {
+	const neu = Number(progress.value.remainingNewEnergy)
+	const rev = Number(progress.value.remainingReviewEnergy)
+	if (progress.value.status === 'done') {
+		return '今天练完了'
+	}
+	if (neu || rev) {
+		return '还差' + [neu ? ('新学 ' + neu + ' 能') : '', rev ? ('复习 ' + rev + ' 能') : ''].filter(Boolean).join('、')
+	}
+	return ''
+}
+
+function legacyResultLabel() {
 	if (!result.value) {
 		return ''
 	}
@@ -175,19 +282,10 @@ const resultLabel = computed(() => {
 		return result.value.correct ? '对照一致（背诵不记间隔）' : '再读一读（背诵不记间隔）'
 	}
 	if (result.value.revealed) {
-		return '看过答案 · 记为模糊'
+		return '看过答案了'
 	}
-	return result.value.correct ? '全对' : (result.value.quality === 3 ? '模糊' : '再练')
-})
-const emptyHint = computed(() => {
-	if (mode.value === 'test') {
-		return '今天没有到期复习卡可测。可以切到「学习」练新卡，或明天再来。'
-	}
-	if (mode.value === 'recite') {
-		return '今天没有可朗读的学习卡。'
-	}
-	return '今天的默写做完了。新学和复习能量都已用完（或没有到期卡片）。'
-})
+	return result.value.correct ? '全对！' : (result.value.quality === 3 ? '差不多对了' : '这题先记下')
+}
 
 async function loadToday(nextMode) {
 	loading.value = true
@@ -201,13 +299,15 @@ async function loadToday(nextMode) {
 		result.value = null
 		answer.value = ''
 		revealedCount.value = 0
+		sessionStreak.value = 0
+		sessionDoneCount.value = 0
+		sessionAttempts.value = 0
 		itemCount.value = Number(data.itemCount) || 0
 		mode.value = data.mode || 'learn'
-		energyCharged.value = data.energyCharged !== false
-		if (energyCharged.value) {
-			meta.value = '今日新学 ' + (data.newEnergy || 0) + '/' + (data.newBudget || 30) + ' 能 · 复习 ' + (data.reviewEnergy || 0) + '/' + (data.reviewBudget || 30) + ' 能 · ' + (data.tasks || 0) + ' 张学习卡 / ' + (data.cards || data.items.length) + ' 个知识点'
-		} else {
-			meta.value = '背诵不计能量 · ' + (data.tasks || 0) + ' 张学习卡 / ' + (data.cards || data.items.length) + ' 个知识点可朗读（新学预算 ' + (data.newBudget || 30) + ' 能 / 复习预算 ' + (data.reviewBudget || 30) + ' 能）'
+		reviewDefaultTest.value = !!data.reviewDefaultTest
+		progress.value = data.progress || {}
+		if (Array.isArray(data.modes) && data.modes.length) {
+			modeOptions.value = data.modes
 		}
 		if (route.query.mode !== mode.value) {
 			router.replace({ query: { mode: mode.value } })
@@ -228,6 +328,23 @@ function selectMode(id) {
 	loadToday(id)
 }
 
+async function toggleReviewPref(checked) {
+	error.value = ''
+	prefBusy.value = true
+	try {
+		const data = await request('/courses/' + route.params.id, {
+			method: 'PATCH',
+			body: JSON.stringify({ reviewDefaultTest: !!checked })
+		})
+		reviewDefaultTest.value = !!data.reviewDefaultTest
+	} catch (err) {
+		error.value = err.message
+		reviewDefaultTest.value = !checked
+	} finally {
+		prefBusy.value = false
+	}
+}
+
 async function submit(reveal) {
 	error.value = ''
 	busy.value = true
@@ -242,8 +359,22 @@ async function submit(reveal) {
 			})
 		})
 		result.value = data
-		if (data.updateSm2 !== false && data.quality < 3) {
-			queue.value.push(card.value)
+		if (data.updateSm2 !== false) {
+			sessionAttempts.value += 1
+			if (data.correct) {
+				sessionStreak.value += 1
+			} else {
+				sessionStreak.value = 0
+			}
+			if (Number(data.quality) >= 3) {
+				sessionDoneCount.value += 1
+			}
+			if (data.quality < 3) {
+				queue.value.push(card.value)
+			}
+		} else if (mode.value === 'recite') {
+			sessionAttempts.value += 1
+			sessionStreak.value = data.correct ? sessionStreak.value + 1 : 0
 		}
 	} catch (err) {
 		error.value = err.message

@@ -15,10 +15,11 @@ from .study_modes import (
     MODE_OPTIONS,
     answer_lines,
     apply_today_mode,
-    default_study_mode,
     normalize_mode,
+    resolve_default_mode,
     review_outcome,
 )
+from .progress import build_progress, kid_feedback, mastery_counts, parent_copy
 from .cards import (
     GRADES,
     KIND_LABEL,
@@ -104,6 +105,7 @@ class CourseBody(BaseModel):
     grades: list[str] = Field(default_factory=list)
     newEnergy: int = 30
     reviewEnergy: int = 30
+    reviewDefaultTest: bool = False
 
 
 class CoursePatch(BaseModel):
@@ -111,6 +113,7 @@ class CoursePatch(BaseModel):
     note: str | None = None
     newEnergy: int | None = None
     reviewEnergy: int | None = None
+    reviewDefaultTest: bool | None = None
 
 
 class CoursePreviewBody(BaseModel):
@@ -656,8 +659,8 @@ def create_course(body: CourseBody, user=Depends(current_user)):
             raise HTTPException(status_code=400, detail="没有符合条件的已发布知识点")
         course = conn.execute(
             """
-            INSERT INTO courses (user_id, name, note, kinds, levels, grades, new_energy, review_energy)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO courses (user_id, name, note, kinds, levels, grades, new_energy, review_energy, review_default_test)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
             """,
             (
@@ -669,6 +672,7 @@ def create_course(body: CourseBody, user=Depends(current_user)):
                 encode_filters(grades, GRADES),
                 new_energy,
                 review_energy,
+                bool(body.reviewDefaultTest),
             ),
         ).fetchone()
         for index, point in enumerate(points):
@@ -683,6 +687,7 @@ def create_course(body: CourseBody, user=Depends(current_user)):
 
 @app.get("/api/courses")
 def list_courses(user=Depends(current_user)):
+    today = sm2.today_text()
     with connect() as conn:
         rows = conn.execute(
             """
@@ -709,6 +714,7 @@ def list_courses(user=Depends(current_user)):
                     course,
                     course["item_count"],
                     published_count=_matching_published_count(conn, course),
+                    progress=_course_today_progress(conn, course, user["id"], today),
                 )
             )
         if changed:
@@ -729,13 +735,14 @@ def preview_course(body: CoursePreviewBody, user=Depends(current_user)):
     return plan
 
 
-def serialize_course(row, item_count=None, plan=None, published_count=None):
+def serialize_course(row, item_count=None, plan=None, published_count=None, progress=None):
     data = dict(row)
     data["kinds"] = decode_filters(row.get("kinds"), KINDS)
     data["levels"] = decode_filters(row.get("levels"), LEVELS)
     data["grades"] = decode_filters(row.get("grades"), GRADES)
     data["newEnergy"] = int(row.get("new_energy") or 30)
     data["reviewEnergy"] = int(row.get("review_energy") or 30)
+    data["reviewDefaultTest"] = bool(row.get("review_default_test"))
     data["isDefault"] = _is_default_course(row)
     count = item_count if item_count is not None else data.get("item_count")
     if count is not None:
@@ -746,6 +753,8 @@ def serialize_course(row, item_count=None, plan=None, published_count=None):
         data["pendingCount"] = max(0, int(published_count) - int(data.get("itemCount") or 0))
     if plan is not None:
         data["plan"] = plan
+    if progress is not None:
+        data["progress"] = progress
     return data
 
 
@@ -854,6 +863,73 @@ def _course_item_count(conn, course_id):
     ).fetchone()["n"]
 
 
+def _course_review_pref(course):
+    return bool(course.get("review_default_test"))
+
+
+def _load_today_points(conn, course_id, user_id):
+    return conn.execute(
+        """
+        SELECT p.id, p.kind, p.level, p.grade, p.prompt, p.answer, p.tags, p.source,
+               p.point_key, p.group_key, p.sub_group_key,
+               s.n, s.ef, s.interval, s.due, s.lapses, s.last
+        FROM course_items i
+        JOIN knowledge_published p ON p.id = i.point_id
+        LEFT JOIN review_state s
+            ON s.point_id = p.id AND s.user_id = %s AND s.course_id = %s
+        WHERE i.course_id = %s
+        ORDER BY i.sort, p.id
+        """,
+        (user_id, course_id, course_id),
+    ).fetchall()
+
+
+def _load_today_logs(conn, course_id, user_id, today):
+    return conn.execute(
+        """
+        SELECT l.point_id, l.quality, l.correct, l.is_new, l.created_at, p.kind
+        FROM review_log l
+        JOIN knowledge_published p ON p.id = l.point_id
+        WHERE l.user_id = %s AND l.course_id = %s AND l.created_at::date = %s
+        ORDER BY l.created_at, l.id
+        """,
+        (user_id, course_id, today),
+    ).fetchall()
+
+
+def _failed_ids_from_logs(logs):
+    latest = {}
+    for row in logs or []:
+        latest[row["point_id"]] = int(row["quality"] or 0)
+    return {point_id for point_id, quality in latest.items() if quality < 3}
+
+
+def _plan_course_today(conn, course, user_id, today):
+    points = _load_today_points(conn, course["id"], user_id)
+    logs = _load_today_logs(conn, course["id"], user_id, today)
+    planned = plan_today_groups(
+        points,
+        _failed_ids_from_logs(logs),
+        today,
+        course.get("new_energy") or 30,
+        course.get("review_energy") or 30,
+    )
+    return points, logs, planned
+
+
+def _course_today_progress(conn, course, user_id, today, planned=None, logs=None, item_count=None, mastery=None):
+    if planned is None or logs is None:
+        points, logs, planned = _plan_course_today(conn, course, user_id, today)
+        item_count = len(points) if item_count is None else item_count
+    return build_progress(
+        planned,
+        logs,
+        item_count=item_count if item_count is not None else 0,
+        mastered=None if mastery is None else mastery.get("mastered"),
+        total=None if mastery is None else mastery.get("total"),
+    )
+
+
 @app.patch("/api/courses/{course_id}")
 def patch_course(course_id: int, body: CoursePatch, user=Depends(current_user)):
     payload = body.model_dump(exclude_unset=True)
@@ -865,7 +941,8 @@ def patch_course(course_id: int, body: CoursePatch, user=Depends(current_user)):
         payload["note"] = (payload["note"] or "").strip()
     new_energy = parse_energy_limit(payload.pop("newEnergy"), None) if "newEnergy" in payload else None
     review_energy = parse_energy_limit(payload.pop("reviewEnergy"), None) if "reviewEnergy" in payload else None
-    if not payload and new_energy is None and review_energy is None:
+    review_pref = payload.pop("reviewDefaultTest") if "reviewDefaultTest" in payload else None
+    if not payload and new_energy is None and review_energy is None and review_pref is None:
         raise HTTPException(status_code=400, detail="没有要修改的字段")
     with connect() as conn:
         course = _own_course(conn, course_id, user["id"])
@@ -875,10 +952,12 @@ def patch_course(course_id: int, body: CoursePatch, user=Depends(current_user)):
             merged["new_energy"] = new_energy
         if review_energy is not None:
             merged["review_energy"] = review_energy
+        if review_pref is not None:
+            merged["review_default_test"] = bool(review_pref)
         conn.execute(
             """
             UPDATE courses
-            SET name = %s, note = %s, new_energy = %s, review_energy = %s
+            SET name = %s, note = %s, new_energy = %s, review_energy = %s, review_default_test = %s
             WHERE id = %s
             """,
             (
@@ -886,6 +965,7 @@ def patch_course(course_id: int, body: CoursePatch, user=Depends(current_user)):
                 merged["note"],
                 merged.get("new_energy") or 30,
                 merged.get("review_energy") or 30,
+                bool(merged.get("review_default_test")),
                 course_id,
             ),
         )
@@ -895,6 +975,7 @@ def patch_course(course_id: int, body: CoursePatch, user=Depends(current_user)):
             updated,
             _course_item_count(conn, course_id),
             published_count=_matching_published_count(conn, updated),
+            progress=_course_today_progress(conn, updated, user["id"], sm2.today_text()),
         )
 
 
@@ -937,42 +1018,10 @@ def today_queue(course_id: int, mode: str | None = None, user=Depends(current_us
     with connect() as conn:
         course = _own_course(conn, course_id, user["id"])
         _ensure_default_synced(conn, course)
-        points = conn.execute(
-            """
-            SELECT p.id, p.kind, p.level, p.grade, p.prompt, p.answer, p.tags, p.source,
-                   p.point_key, p.group_key, p.sub_group_key,
-                   s.n, s.ef, s.interval, s.due, s.lapses, s.last
-            FROM course_items i
-            JOIN knowledge_published p ON p.id = i.point_id
-            LEFT JOIN review_state s
-                ON s.point_id = p.id AND s.user_id = %s AND s.course_id = %s
-            WHERE i.course_id = %s
-            ORDER BY i.sort, p.id
-            """,
-            (user["id"], course_id, course_id),
-        ).fetchall()
-        failed_ids = {
-            row["point_id"]
-            for row in conn.execute(
-                """
-                SELECT DISTINCT ON (point_id) point_id, quality
-                FROM review_log
-                WHERE user_id = %s AND course_id = %s AND created_at::date = %s
-                ORDER BY point_id, created_at DESC
-                """,
-                (user["id"], course_id, today),
-            ).fetchall()
-            if row["quality"] < 3
-        }
-    planned = plan_today_groups(
-        points,
-        failed_ids,
-        today,
-        course.get("new_energy") or 30,
-        course.get("review_energy") or 30,
-    )
-    suggested = default_study_mode(planned)
+        points, logs, planned = _plan_course_today(conn, course, user["id"], today)
+    suggested = resolve_default_mode(planned, _course_review_pref(course))
     active = normalize_mode(mode) if mode else suggested
+    progress = build_progress(planned, logs, item_count=len(points))
     planned = apply_today_mode(planned, active)
     items = []
     include_answer = active == "recite"
@@ -1016,8 +1065,10 @@ def today_queue(course_id: int, mode: str | None = None, user=Depends(current_us
         "isDefault": _is_default_course(course),
         "mode": active,
         "defaultMode": suggested,
+        "reviewDefaultTest": _course_review_pref(course),
         "energyCharged": planned.get("energyCharged", True),
         "modes": list(MODE_OPTIONS),
+        "progress": progress,
     }
 
 
@@ -1105,11 +1156,18 @@ def review_point(course_id: int, body: ReviewBody, user=Depends(current_user)):
     result["mode"] = mode
     result["updateSm2"] = outcome["update_sm2"]
     result["revealed"] = bool(body.reveal)
+    result["feedback"] = kid_feedback(
+        mode,
+        result,
+        revealed=bool(body.reveal),
+        update_sm2=outcome["update_sm2"],
+    )
     return result
 
 
 @app.get("/api/courses/{course_id}/stats")
 def course_stats(course_id: int, user=Depends(current_user)):
+    today = sm2.today_text()
     with connect() as conn:
         course = _own_course(conn, course_id, user["id"])
         _ensure_default_synced(conn, course)
@@ -1132,12 +1190,41 @@ def course_stats(course_id: int, user=Depends(current_user)):
             """,
             (user["id"], course_id, user["id"], course_id, course_id),
         ).fetchall()
+        points, logs, planned = _plan_course_today(conn, course, user["id"], today)
     items = []
     for row in rows:
         item = dict(row)
         item["mastered"] = sm2.is_mastered(row)
         items.append(item)
-    return {"items": items}
+    mastery = mastery_counts(items)
+    progress = build_progress(
+        planned,
+        logs,
+        item_count=len(points),
+        mastered=mastery["mastered"],
+        total=mastery["total"],
+    )
+    if not progress["weakKinds"]:
+        progress = dict(progress)
+        progress["weakKinds"] = mastery["weakKinds"]
+        progress["summary"] = parent_copy(
+            progress["status"],
+            progress["todayPracticed"],
+            progress["todayAccuracy"],
+            progress["weakKinds"],
+            progress["remainingNewEnergy"],
+            progress["remainingReviewEnergy"],
+            mastered=mastery["mastered"],
+            total=mastery["total"],
+        )
+    return {
+        "items": items,
+        "today": progress,
+        "mastery": mastery,
+        "summary": progress["summary"],
+        "courseName": course.get("name") or "",
+        "reviewDefaultTest": _course_review_pref(course),
+    }
 
 
 @app.get("/api/library/coverage")
