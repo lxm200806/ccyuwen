@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from . import sm2
-from .auth import current_user, make_token, require_admin, verify_password
+from .auth import current_user, demo_hints_enabled, make_token, require_admin, verify_password
 from .cards import (
     GRADES,
     KIND_LABEL,
@@ -34,6 +34,7 @@ from .db import connect, init_db
 from .grade import grade_answer
 from .materials import (
     PACKS,
+    attach_default_course,
     data_root,
     decorate_resource,
     find_pack,
@@ -138,6 +139,7 @@ def meta():
         "kinds": [{"id": key, "label": KIND_LABEL[key]} for key in KINDS],
         "levels": list(LEVELS),
         "grades": list(GRADES),
+        "demoHints": demo_hints_enabled(),
     }
 
 
@@ -513,6 +515,8 @@ def publish_draft(draft_id: int, user=Depends(require_admin)):
             ).fetchone()
             published_id = published["id"]
         conn.execute("UPDATE knowledge_draft SET status = 'published' WHERE id = %s", (draft_id,))
+        with conn.cursor() as cur:
+            attach_default_course(cur, [published_id])
         conn.commit()
         return conn.execute("SELECT * FROM knowledge_published WHERE id = %s", (published_id,)).fetchone()
 
@@ -664,7 +668,7 @@ def create_course(body: CourseBody, user=Depends(current_user)):
             )
         conn.commit()
         plan = plan_course_days(points, new_energy, review_energy)
-        return serialize_course(course, len(points), plan)
+        return serialize_course(course, len(points), plan, published_count=len(points))
 
 
 @app.get("/api/courses")
@@ -681,7 +685,25 @@ def list_courses(user=Depends(current_user)):
             """,
             (user["id"],),
         ).fetchall()
-    return [serialize_course(row, row["item_count"]) for row in rows]
+        results = []
+        changed = False
+        for row in rows:
+            course = dict(row)
+            if _is_default_course(course):
+                added = _sync_course_items(conn, course)
+                if added:
+                    changed = True
+                    course["item_count"] = _course_item_count(conn, course["id"])
+            results.append(
+                serialize_course(
+                    course,
+                    course["item_count"],
+                    published_count=_matching_published_count(conn, course),
+                )
+            )
+        if changed:
+            conn.commit()
+    return results
 
 
 @app.post("/api/courses/preview")
@@ -697,20 +719,84 @@ def preview_course(body: CoursePreviewBody, user=Depends(current_user)):
     return plan
 
 
-def serialize_course(row, item_count=None, plan=None):
+def serialize_course(row, item_count=None, plan=None, published_count=None):
     data = dict(row)
     data["kinds"] = decode_filters(row.get("kinds"), KINDS)
     data["levels"] = decode_filters(row.get("levels"), LEVELS)
     data["grades"] = decode_filters(row.get("grades"), GRADES)
     data["newEnergy"] = int(row.get("new_energy") or 30)
     data["reviewEnergy"] = int(row.get("review_energy") or 30)
+    data["isDefault"] = _is_default_course(row)
     count = item_count if item_count is not None else data.get("item_count")
     if count is not None:
         data["itemCount"] = int(count)
         data["item_count"] = int(count)
+    if published_count is not None:
+        data["publishedCount"] = int(published_count)
+        data["pendingCount"] = max(0, int(published_count) - int(data.get("itemCount") or 0))
     if plan is not None:
         data["plan"] = plan
     return data
+
+
+def _is_default_course(course):
+    return (course.get("name") or "") == "默认课程"
+
+
+def _course_filters(course):
+    kinds = decode_filters(course.get("kinds"), KINDS) or list(KINDS)
+    levels = decode_filters(course.get("levels"), LEVELS) or list(LEVELS)
+    grades = decode_filters(course.get("grades"), GRADES)
+    return kinds, levels, grades
+
+
+def _matching_published_count(conn, course):
+    kinds, levels, grades = _course_filters(course)
+    sql = "SELECT COUNT(*) AS n FROM knowledge_published WHERE kind = ANY(%s) AND level = ANY(%s)"
+    args = [kinds, levels]
+    if grades:
+        sql += " AND grade = ANY(%s)"
+        args.append(grades)
+    return conn.execute(sql, args).fetchone()["n"]
+
+
+def _sync_course_items(conn, course):
+    kinds, levels, grades = _course_filters(course)
+    if not decode_filters(course.get("kinds"), KINDS) or not decode_filters(course.get("levels"), LEVELS):
+        if not _is_default_course(course):
+            return 0
+    course_id = course["id"]
+    existing = {
+        row["point_id"]
+        for row in conn.execute(
+            "SELECT point_id FROM course_items WHERE course_id = %s",
+            (course_id,),
+        ).fetchall()
+    }
+    max_sort = conn.execute(
+        "SELECT COALESCE(MAX(sort), -1) AS n FROM course_items WHERE course_id = %s",
+        (course_id,),
+    ).fetchone()["n"]
+    added = 0
+    for point in _candidate_points(conn, kinds, levels, grades):
+        if point["id"] in existing:
+            continue
+        max_sort += 1
+        conn.execute(
+            "INSERT INTO course_items (course_id, point_id, sort) VALUES (%s, %s, %s)",
+            (course_id, point["id"], max_sort),
+        )
+        added += 1
+    return added
+
+
+def _ensure_default_synced(conn, course):
+    if not _is_default_course(course):
+        return course, 0
+    added = _sync_course_items(conn, course)
+    if added:
+        conn.commit()
+    return course, added
 
 
 def _candidate_points(conn, kinds, levels, grades):
@@ -795,7 +881,11 @@ def patch_course(course_id: int, body: CoursePatch, user=Depends(current_user)):
         )
         conn.commit()
         updated = conn.execute("SELECT * FROM courses WHERE id = %s", (course_id,)).fetchone()
-        return serialize_course(updated, _course_item_count(conn, course_id))
+        return serialize_course(
+            updated,
+            _course_item_count(conn, course_id),
+            published_count=_matching_published_count(conn, updated),
+        )
 
 
 @app.delete("/api/courses/{course_id}")
@@ -821,43 +911,12 @@ def sync_course(course_id: int, user=Depends(current_user)):
         course = _own_course(conn, course_id, user["id"])
         kinds = decode_filters(course.get("kinds"), KINDS)
         levels = decode_filters(course.get("levels"), LEVELS)
-        grades = decode_filters(course.get("grades"), GRADES)
         if not kinds or not levels:
             raise HTTPException(status_code=400, detail="旧课程没有筛选条件，请新建课程后再同步")
-        existing = {
-            row["point_id"]
-            for row in conn.execute(
-                "SELECT point_id FROM course_items WHERE course_id = %s",
-                (course_id,),
-            ).fetchall()
-        }
-        max_sort = conn.execute(
-            "SELECT COALESCE(MAX(sort), -1) AS n FROM course_items WHERE course_id = %s",
-            (course_id,),
-        ).fetchone()["n"]
-        sql = """
-            SELECT id FROM knowledge_published
-            WHERE kind = ANY(%s) AND level = ANY(%s)
-            """
-        args = [kinds, levels]
-        if grades:
-            sql += " AND grade = ANY(%s)"
-            args.append(grades)
-        sql += " ORDER BY grade, kind, level, id"
-        candidates = conn.execute(sql, args).fetchall()
-        added = 0
-        for point in candidates:
-            if point["id"] in existing:
-                continue
-            max_sort += 1
-            conn.execute(
-                "INSERT INTO course_items (course_id, point_id, sort) VALUES (%s, %s, %s)",
-                (course_id, point["id"], max_sort),
-            )
-            added += 1
+        added = _sync_course_items(conn, course)
         conn.commit()
         count = _course_item_count(conn, course_id)
-        result = serialize_course(course, count)
+        result = serialize_course(course, count, published_count=_matching_published_count(conn, course))
         result["added"] = added
         return result
 
@@ -867,6 +926,7 @@ def today_queue(course_id: int, user=Depends(current_user)):
     today = sm2.today_text()
     with connect() as conn:
         course = _own_course(conn, course_id, user["id"])
+        _ensure_default_synced(conn, course)
         points = conn.execute(
             """
             SELECT p.id, p.kind, p.level, p.grade, p.prompt, p.answer, p.tags, p.source,
@@ -931,6 +991,9 @@ def today_queue(course_id: int, user=Depends(current_user)):
         "reviewEnergy": planned["reviewEnergy"],
         "newBudget": planned["newBudget"],
         "reviewBudget": planned["reviewBudget"],
+        "itemCount": len(points),
+        "courseName": course.get("name") or "",
+        "isDefault": _is_default_course(course),
     }
 
 
@@ -938,6 +1001,7 @@ def today_queue(course_id: int, user=Depends(current_user)):
 def course_plan(course_id: int, user=Depends(current_user)):
     with connect() as conn:
         course = _own_course(conn, course_id, user["id"])
+        _ensure_default_synced(conn, course)
         points = _course_plan_points(conn, course_id)
     plan = plan_course_days(points, course.get("new_energy") or 30, course.get("review_energy") or 30)
     plan["course"] = serialize_course(course, len(points))
@@ -1011,7 +1075,8 @@ def review_point(course_id: int, body: ReviewBody, user=Depends(current_user)):
 @app.get("/api/courses/{course_id}/stats")
 def course_stats(course_id: int, user=Depends(current_user)):
     with connect() as conn:
-        _own_course(conn, course_id, user["id"])
+        course = _own_course(conn, course_id, user["id"])
+        _ensure_default_synced(conn, course)
         rows = conn.execute(
             """
             SELECT p.id, p.kind, p.level, p.grade, p.prompt, p.source,

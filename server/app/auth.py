@@ -13,6 +13,14 @@ JWT_ALG = "HS256"
 bearer = HTTPBearer(auto_error=False)
 
 
+def demo_hints_enabled():
+    """Show local demo-account copy only when explicitly enabled or using the dev JWT."""
+    raw = os.environ.get("DEMO_HINTS")
+    if raw is not None and str(raw).strip() != "":
+        return str(raw).strip().lower() in ("1", "true", "yes", "on")
+    return os.environ.get("JWT_SECRET", "ccyuwen-dev") == "ccyuwen-dev"
+
+
 def hash_password(plain):
     salt = secrets.token_hex(8)
     digest = hashlib.pbkdf2_hmac("sha256", plain.encode("utf-8"), salt.encode("utf-8"), 120000)

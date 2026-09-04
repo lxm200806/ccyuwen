@@ -1,7 +1,7 @@
 <template>
 	<section class="card">
 		<h2>从已发布库生成课程</h2>
-		<p class="muted">按年级、类型、级别筛选。每条知识点都带来源，方便对照教材。</p>
+		<p class="muted">按年级、类型、级别筛选。每条知识点都带来源，方便对照教材。组课页不显示答案；要看答案请去「知识点」。</p>
 		<label for="course-name">课程名称</label>
 		<input id="course-name" v-model="name">
 		<label for="course-note">备注</label>
@@ -37,14 +37,23 @@
 				<input v-model.number="reviewEnergy" min="8" max="120" type="number">
 			</label>
 		</div>
+		<p class="hint">
+			<strong>新学能量</strong>是每天新内容的上限，<strong>复习能量</strong>是每天复习到期内容的上限。一张<strong>学习卡</strong>是同一课文 / 模块的几条知识点，能量加总后按天安排。
+		</p>
 		<p class="muted">
-			当前筛选 {{ total }} 条。
-			<template v-if="preview.dayCount">
-				约 {{ preview.groupCount }} 张学习卡、{{ preview.totalEnergy }} 能量；新学约 {{ preview.newDayCount || preview.dayCount }} 天，含复习共 {{ preview.dayCount }} 天（按全对估算）。
+			<template v-if="loading">正在按当前筛选预览…</template>
+			<template v-else>
+				当前筛选 {{ total }} 条。
+				<template v-if="preview.dayCount">
+					约 {{ preview.groupCount }} 张学习卡、{{ preview.totalEnergy }} 能量；新学约 {{ preview.newDayCount || preview.dayCount }} 天，含复习共 {{ preview.dayCount }} 天（按全对估算）。
+				</template>
 			</template>
 		</p>
+		<p v-if="!loading && total === 0" class="hint">
+			当前筛选没有已发布知识点。可放宽年级 / 类型 / 级别，或先去「知识点」确认词库，管理员也可在「原始资料」同步教材。
+		</p>
 		<p class="muted">字 1 · 词语 2 · 成语 4 · 古诗 16/24/32 · 文言文 24/32/64/96。一张学习卡约 30 能量学一天，15 能量可配两张，50 以上拆成两天。</p>
-		<button type="button" @click="createCourse">生成课程</button>
+		<button type="button" :disabled="busy || loading || total === 0" @click="createCourse">{{ busy ? '正在生成…' : '生成课程' }}</button>
 		<p v-if="message" class="ok">{{ message }}</p>
 		<p v-if="error" class="error">{{ error }}</p>
 		<ul>
@@ -76,6 +85,8 @@ const total = ref(0)
 const preview = ref({})
 const message = ref('')
 const error = ref('')
+const loading = ref(false)
+const busy = ref(false)
 
 async function loadLibrary() {
 	error.value = ''
@@ -85,6 +96,7 @@ async function loadLibrary() {
 		preview.value = {}
 		return
 	}
+	loading.value = true
 	try {
 		const params = new URLSearchParams()
 		params.set('kinds', kinds.value.join(','))
@@ -108,12 +120,15 @@ async function loadLibrary() {
 		})
 	} catch (err) {
 		error.value = err.message
+	} finally {
+		loading.value = false
 	}
 }
 
 async function createCourse() {
 	error.value = ''
 	message.value = ''
+	busy.value = true
 	try {
 		const course = await request('/courses', {
 			method: 'POST',
@@ -130,6 +145,8 @@ async function createCourse() {
 		message.value = '已生成课程 #' + course.id + '，共 ' + course.itemCount + ' 条；新学约 ' + ((course.plan && course.plan.newDayCount) || 0) + ' 天，含复习共 ' + ((course.plan && course.plan.dayCount) || 0) + ' 天'
 	} catch (err) {
 		error.value = err.message
+	} finally {
+		busy.value = false
 	}
 }
 
