@@ -532,6 +532,10 @@ def plan_today_groups(rows, failed_ids, today, new_energy=DEFAULT_NEW_ENERGY, re
     fresh_sessions = expand_sessions(cluster_groups(fresh_rows), new_budget)
     review_today, review_used = pack_one_day(review_sessions, review_budget)
     fresh_today, fresh_used = pack_one_day(fresh_sessions, new_budget)
+    for session in review_today:
+        session["role"] = "review"
+    for session in fresh_today:
+        session["role"] = "new"
     picked = review_today + fresh_today
     return {
         "groups": picked,
@@ -566,6 +570,7 @@ def flatten_today_groups(groups):
                     "part": group.get("part") or 1,
                     "parts": group.get("parts") or 1,
                     "title": group.get("title") or "",
+                    "role": group.get("role") or "new",
                 }
             )
     return items

@@ -273,14 +273,60 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(today.status_code, 200, today.text)
         self.assertTrue(any(item["id"] == point_id for item in today.json()["items"]))
 
+        today = self.client.get("/api/courses/" + str(course_id) + "/today", headers=self.kid)
+        self.assertEqual(today.status_code, 200, today.text)
+        self.assertTrue(any(item["id"] == point_id for item in today.json()["items"]))
+        self.assertEqual(today.json().get("mode"), "learn")
+        self.assertEqual(today.json().get("defaultMode"), "learn")
+
+        recite_today = self.client.get(
+            "/api/courses/" + str(course_id) + "/today?mode=recite",
+            headers=self.kid,
+        )
+        self.assertEqual(recite_today.status_code, 200, recite_today.text)
+        self.assertFalse(recite_today.json().get("energyCharged"))
+        self.assertEqual(recite_today.json().get("newEnergy"), 0)
+        recited = next(item for item in recite_today.json()["items"] if item["id"] == point_id)
+        self.assertEqual(recited.get("answer"), "测")
+
+        recite = self.client.post(
+            "/api/courses/" + str(course_id) + "/review",
+            json={"pointId": point_id, "answer": "测", "mode": "recite"},
+            headers=self.kid,
+        )
+        self.assertEqual(recite.status_code, 200, recite.text)
+        self.assertTrue(recite.json()["correct"])
+        self.assertFalse(recite.json()["updateSm2"])
+        self.assertTrue(recite.json()["isNew"])
+
+        peek = self.client.post(
+            "/api/courses/" + str(course_id) + "/review",
+            json={"pointId": point_id, "answer": "", "reveal": True, "mode": "learn"},
+            headers=self.kid,
+        )
+        self.assertEqual(peek.status_code, 200, peek.text)
+        self.assertEqual(peek.json()["quality"], 3)
+        self.assertFalse(peek.json()["correct"])
+        self.assertTrue(peek.json()["updateSm2"])
+        self.assertEqual(peek.json()["state"]["n"], 1)
+        self.assertEqual(peek.json()["state"]["lapses"], 0)
+
+        blocked = self.client.post(
+            "/api/courses/" + str(course_id) + "/review",
+            json={"pointId": point_id, "answer": "", "reveal": True, "mode": "test"},
+            headers=self.kid,
+        )
+        self.assertEqual(blocked.status_code, 400, blocked.text)
+
         review = self.client.post(
             "/api/courses/" + str(course_id) + "/review",
-            json={"pointId": point_id, "answer": "测"},
+            json={"pointId": point_id, "answer": "测", "mode": "test"},
             headers=self.kid,
         )
         self.assertEqual(review.status_code, 200, review.text)
         self.assertEqual(review.json()["quality"], 5)
         self.assertTrue(review.json()["correct"])
+        self.assertTrue(review.json()["updateSm2"])
 
         extra_prompt = "看拼音写字：shì（同步" + self.marker + "）"
         extra = self.client.post(

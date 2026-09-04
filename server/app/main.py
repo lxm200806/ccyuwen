@@ -11,6 +11,14 @@ from pydantic import BaseModel, Field
 
 from . import sm2
 from .auth import current_user, demo_hints_enabled, make_token, require_admin, verify_password
+from .study_modes import (
+    MODE_OPTIONS,
+    answer_lines,
+    apply_today_mode,
+    default_study_mode,
+    normalize_mode,
+    review_outcome,
+)
 from .cards import (
     GRADES,
     KIND_LABEL,
@@ -117,6 +125,7 @@ class ReviewBody(BaseModel):
     pointId: int
     answer: str = ""
     reveal: bool = False
+    mode: str = "learn"
 
 
 @app.on_event("startup")
@@ -140,6 +149,7 @@ def meta():
         "levels": list(LEVELS),
         "grades": list(GRADES),
         "demoHints": demo_hints_enabled(),
+        "studyModes": list(MODE_OPTIONS),
     }
 
 
@@ -922,7 +932,7 @@ def sync_course(course_id: int, user=Depends(current_user)):
 
 
 @app.get("/api/courses/{course_id}/today")
-def today_queue(course_id: int, user=Depends(current_user)):
+def today_queue(course_id: int, mode: str | None = None, user=Depends(current_user)):
     today = sm2.today_text()
     with connect() as conn:
         course = _own_course(conn, course_id, user["id"])
@@ -961,24 +971,34 @@ def today_queue(course_id: int, user=Depends(current_user)):
         course.get("new_energy") or 30,
         course.get("review_energy") or 30,
     )
+    suggested = default_study_mode(planned)
+    active = normalize_mode(mode) if mode else suggested
+    planned = apply_today_mode(planned, active)
     items = []
+    include_answer = active == "recite"
+    hide_source = active == "test"
     for entry in flatten_today_groups(planned["groups"]):
-        item = serialize_point(
-            entry["row"],
-            {
-                "groupKey": entry["group_key"],
-                "groupSize": entry["group_size"],
-                "groupIndex": entry["group_index"],
-                "taskIndex": entry["task_index"],
-                "taskCount": entry["task_count"],
-                "pointKey": entry["row"].get("point_key") or "",
-                "energy": entry["energy"],
-                "groupEnergy": entry["group_energy"],
-                "part": entry["part"],
-                "parts": entry["parts"],
-                "cardTitle": entry["title"],
-            },
-        )
+        extra = {
+            "groupKey": entry["group_key"],
+            "groupSize": entry["group_size"],
+            "groupIndex": entry["group_index"],
+            "taskIndex": entry["task_index"],
+            "taskCount": entry["task_count"],
+            "pointKey": entry["row"].get("point_key") or "",
+            "energy": entry["energy"],
+            "groupEnergy": entry["group_energy"],
+            "part": entry["part"],
+            "parts": entry["parts"],
+            "cardTitle": entry["title"],
+            "role": entry.get("role") or "new",
+            "mode": active,
+        }
+        if include_answer:
+            extra["answer"] = entry["row"].get("answer") or ""
+            extra["lines"] = answer_lines(extra["answer"])
+        item = serialize_point(entry["row"], extra)
+        if hide_source:
+            item["source"] = ""
         items.append(item)
     return {
         "today": today,
@@ -994,6 +1014,10 @@ def today_queue(course_id: int, user=Depends(current_user)):
         "itemCount": len(points),
         "courseName": course.get("name") or "",
         "isDefault": _is_default_course(course),
+        "mode": active,
+        "defaultMode": suggested,
+        "energyCharged": planned.get("energyCharged", True),
+        "modes": list(MODE_OPTIONS),
     }
 
 
@@ -1011,6 +1035,7 @@ def course_plan(course_id: int, user=Depends(current_user)):
 @app.post("/api/courses/{course_id}/review")
 def review_point(course_id: int, body: ReviewBody, user=Depends(current_user)):
     today = sm2.today_text()
+    mode = normalize_mode(body.mode)
     with connect() as conn:
         _own_course(conn, course_id, user["id"])
         point = conn.execute(
@@ -1027,48 +1052,59 @@ def review_point(course_id: int, body: ReviewBody, user=Depends(current_user)):
         if not point:
             raise HTTPException(status_code=404, detail="该课程没有这个知识点")
         is_new = point["last"] is None
+        prev_state = {
+            "n": point["n"],
+            "ef": point["ef"],
+            "interval": point["interval"],
+            "lapses": point["lapses"],
+        }
         if body.reveal:
             result = grade_answer("", point["answer"])
-            result["quality"] = 1
-            result["correct"] = False
         else:
             result = grade_answer(body.answer, point["answer"])
-        next_state = sm2.schedule(
-            {"n": point["n"], "ef": point["ef"], "interval": point["interval"], "lapses": point["lapses"]},
-            result["quality"],
-            today,
-        )
-        conn.execute(
-            """
-            INSERT INTO review_state (user_id, course_id, point_id, n, ef, interval, due, lapses, last)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (user_id, course_id, point_id) DO UPDATE SET
-                n = EXCLUDED.n, ef = EXCLUDED.ef, interval = EXCLUDED.interval,
-                due = EXCLUDED.due, lapses = EXCLUDED.lapses, last = EXCLUDED.last
-            """,
-            (
-                user["id"],
-                course_id,
-                body.pointId,
-                next_state["n"],
-                next_state["ef"],
-                next_state["interval"],
-                next_state["due"],
-                next_state["lapses"],
-                next_state["last"],
-            ),
-        )
-        conn.execute(
-            """
-            INSERT INTO review_log (user_id, course_id, point_id, quality, is_new, correct)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            """,
-            (user["id"], course_id, body.pointId, result["quality"], is_new, result["correct"]),
-        )
-        conn.commit()
+        outcome = review_outcome(mode, result, body.reveal)
+        if not outcome["ok"]:
+            raise HTTPException(status_code=400, detail=outcome["error"])
+        result["quality"] = outcome["quality"]
+        result["correct"] = outcome["correct"]
+        next_state = prev_state
+        if outcome["update_sm2"]:
+            next_state = sm2.schedule(prev_state, result["quality"], today)
+            conn.execute(
+                """
+                INSERT INTO review_state (user_id, course_id, point_id, n, ef, interval, due, lapses, last)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (user_id, course_id, point_id) DO UPDATE SET
+                    n = EXCLUDED.n, ef = EXCLUDED.ef, interval = EXCLUDED.interval,
+                    due = EXCLUDED.due, lapses = EXCLUDED.lapses, last = EXCLUDED.last
+                """,
+                (
+                    user["id"],
+                    course_id,
+                    body.pointId,
+                    next_state["n"],
+                    next_state["ef"],
+                    next_state["interval"],
+                    next_state["due"],
+                    next_state["lapses"],
+                    next_state["last"],
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO review_log (user_id, course_id, point_id, quality, is_new, correct)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (user["id"], course_id, body.pointId, result["quality"], is_new, result["correct"]),
+            )
+            conn.commit()
     result["answer"] = point["answer"]
+    result["lines"] = answer_lines(point["answer"])
     result["state"] = next_state
     result["isNew"] = is_new
+    result["mode"] = mode
+    result["updateSm2"] = outcome["update_sm2"]
+    result["revealed"] = bool(body.reveal)
     return result
 
 
