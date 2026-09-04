@@ -1,8 +1,18 @@
 <template>
 	<section class="card">
 		<h2>我的课程</h2>
-		<p class="muted">组课后可改名、删课。词库有新发布时，点「同步新词」按原筛选补进课程。</p>
-		<p v-if="courses.length === 0" class="muted">还没有课程，先去「组课」按类型生成一份。</p>
+		<p class="hint">
+			先打开一门课做「今日默写」。系统「默认课程」会在词库更新后自动补进新知识点；自己组的课请点「同步新词」，按原来的年级 / 类型筛选补进。也可以去「组课」再生成一份。
+		</p>
+		<p v-if="loading" class="muted">正在加载课程…</p>
+		<p v-else-if="courses.length === 0 && !error" class="hint">
+			还没有课程。请先去
+			<router-link to="/library">组课</router-link>
+			按年级和类型生成一份，或让管理员在「原始资料」同步教材后再刷新。
+		</p>
+		<p v-if="staleCourses.length" class="banner" role="status">
+			词库有更新：{{ staleNames }} 比已发布库少知识点。点「同步新词」按原筛选补进课程。
+		</p>
 		<article v-for="item in courses" :key="item.id">
 			<template v-if="editingId === item.id">
 				<label :for="'name-' + item.id">课程名称</label>
@@ -10,8 +20,8 @@
 				<label :for="'note-' + item.id">备注</label>
 				<input :id="'note-' + item.id" v-model="editNote">
 				<div class="course-actions">
-					<button type="button" @click="saveEdit(item.id)">保存</button>
-					<button class="ghost" type="button" @click="cancelEdit">取消</button>
+					<button type="button" :disabled="busy" @click="saveEdit(item.id)">保存</button>
+					<button class="ghost" type="button" :disabled="busy" @click="cancelEdit">取消</button>
 				</div>
 			</template>
 			<template v-else>
@@ -24,13 +34,22 @@
 					</template>
 					· 每天新学 {{ item.newEnergy || 30 }} 能 / 复习 {{ item.reviewEnergy || 30 }} 能
 				</p>
+				<p v-if="item.pendingCount" class="banner">
+					词库有更新，本课还可补进 {{ item.pendingCount }} 条。点「同步新词」按原筛选加入。
+				</p>
 				<div class="course-actions">
 					<router-link :to="'/courses/' + item.id + '/drill'">今日默写</router-link>
 					<router-link :to="'/courses/' + item.id + '/plan'">学习计划</router-link>
 					<router-link :to="'/courses/' + item.id + '/stats'">掌握情况</router-link>
-					<button class="ghost" type="button" @click="startEdit(item)">改名</button>
-					<button class="ghost" type="button" @click="syncCourse(item)">同步新词</button>
-					<button class="ghost danger" type="button" @click="removeCourse(item)">删除</button>
+					<button class="ghost" type="button" :disabled="busy" @click="startEdit(item)">改名</button>
+					<button
+						class="ghost"
+						:class="{ 'sync-needed': item.pendingCount }"
+						type="button"
+						:disabled="busy"
+						@click="syncCourse(item)"
+					>同步新词</button>
+					<button class="ghost danger" type="button" :disabled="busy" @click="removeCourse(item)">删除</button>
 				</div>
 			</template>
 		</article>
@@ -40,7 +59,7 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { request } from '../api.js'
 import { KIND_LABEL } from '../catalog.js'
 
@@ -53,9 +72,18 @@ function kindNames(ids) {
 const courses = ref([])
 const error = ref('')
 const message = ref('')
+const loading = ref(true)
+const busy = ref(false)
 const editingId = ref(0)
 const editName = ref('')
 const editNote = ref('')
+
+const staleCourses = computed(() => courses.value.filter(function (item) {
+	return Number(item.pendingCount) > 0
+}))
+const staleNames = computed(() => staleCourses.value.map(function (item) {
+	return item.name
+}).join('、'))
 
 async function loadCourses() {
 	courses.value = await request('/courses')
@@ -76,6 +104,7 @@ function cancelEdit() {
 async function saveEdit(id) {
 	error.value = ''
 	message.value = ''
+	busy.value = true
 	try {
 		await request('/courses/' + id, {
 			method: 'PATCH',
@@ -86,12 +115,15 @@ async function saveEdit(id) {
 		await loadCourses()
 	} catch (err) {
 		error.value = err.message
+	} finally {
+		busy.value = false
 	}
 }
 
 async function syncCourse(item) {
 	error.value = ''
 	message.value = ''
+	busy.value = true
 	try {
 		const result = await request('/courses/' + item.id + '/sync', { method: 'POST' })
 		message.value = result.added
@@ -100,6 +132,8 @@ async function syncCourse(item) {
 		await loadCourses()
 	} catch (err) {
 		error.value = err.message
+	} finally {
+		busy.value = false
 	}
 }
 
@@ -109,20 +143,26 @@ async function removeCourse(item) {
 	}
 	error.value = ''
 	message.value = ''
+	busy.value = true
 	try {
 		await request('/courses/' + item.id, { method: 'DELETE' })
 		message.value = '已删除 ' + item.name
 		await loadCourses()
 	} catch (err) {
 		error.value = err.message
+	} finally {
+		busy.value = false
 	}
 }
 
 onMounted(async () => {
+	loading.value = true
 	try {
 		await loadCourses()
 	} catch (err) {
 		error.value = err.message
+	} finally {
+		loading.value = false
 	}
 })
 </script>

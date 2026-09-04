@@ -1,8 +1,10 @@
 <template>
 	<section class="card">
 		<h2>课程掌握情况</h2>
+		<p v-if="loading" class="muted">正在加载掌握情况…</p>
 		<p v-if="error" class="error">{{ error }}</p>
-		<table>
+		<p v-else-if="!loading && items.length === 0" class="hint">这门课还没有知识点。请回课程页点「同步新词」，或去「组课」重新生成。</p>
+		<table v-if="items.length">
 			<thead>
 				<tr>
 					<th>年级</th>
@@ -39,13 +41,17 @@ import { request } from '../api.js'
 const route = useRoute()
 const items = ref([])
 const error = ref('')
+const loading = ref(true)
 
 onMounted(async () => {
+	loading.value = true
 	try {
 		const data = await request('/courses/' + route.params.id + '/stats')
 		items.value = data.items
 	} catch (err) {
 		error.value = err.message
+	} finally {
+		loading.value = false
 	}
 })
 </script>

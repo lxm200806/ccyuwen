@@ -1,10 +1,11 @@
 <template>
 	<section class="card">
 		<h2>{{ title }} · 学习计划</h2>
-		<p class="muted">
-			每天新学 {{ plan.newEnergy || 30 }} 能量、复习 {{ plan.reviewEnergy || 30 }} 能量。按全对估算 SM-2：新学约 {{ plan.newDayCount || 0 }} 天，含复习共 {{ plan.dayCount || 0 }} 天。
+		<p class="hint">
+			每天新学 {{ plan.newEnergy || 30 }} 能量、复习 {{ plan.reviewEnergy || 30 }} 能量。新学能量管还没学过的学习卡，复习能量管到期该复习的卡。按全对估算 SM-2：新学约 {{ plan.newDayCount || 0 }} 天，含复习共 {{ plan.dayCount || 0 }} 天。
 			共 {{ plan.pointCount || 0 }} 个知识点、{{ plan.groupCount || 0 }} 张学习卡。点击某一天查看学习卡明细。
 		</p>
+		<p v-if="loading" class="muted">正在加载学习计划…</p>
 		<p v-if="error" class="error">{{ error }}</p>
 		<table v-if="plan.days && plan.days.length">
 			<thead>
@@ -45,7 +46,7 @@
 				</template>
 			</tbody>
 		</table>
-		<p v-else class="muted">还没有计划。</p>
+		<p v-else-if="!loading" class="hint">还没有计划。请确认课程里已有知识点，或回「我的课程」点「同步新词」后再打开本页。</p>
 		<div class="course-actions">
 			<router-link :to="'/courses/' + route.params.id + '/drill'">今日默写</router-link>
 			<router-link to="/courses">返回课程</router-link>
@@ -63,6 +64,7 @@ const route = useRoute()
 const plan = ref({})
 const title = ref('课程')
 const error = ref('')
+const loading = ref(true)
 const openDay = ref(0)
 
 function dayMode(day) {
@@ -80,12 +82,15 @@ function toggleDay(day) {
 }
 
 onMounted(async () => {
+	loading.value = true
 	try {
 		const data = await request('/courses/' + route.params.id + '/plan')
 		plan.value = data
 		title.value = (data.course && data.course.name) || '课程'
 	} catch (err) {
 		error.value = err.message
+	} finally {
+		loading.value = false
 	}
 })
 </script>

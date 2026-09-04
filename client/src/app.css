@@ -158,6 +158,46 @@ textarea {
 	gap: 10px;
 }
 
+button:disabled {
+	opacity: 0.55;
+	cursor: default;
+}
+
+.hint {
+	color: var(--muted);
+	font-size: 14px;
+	line-height: 1.65;
+}
+
+.hint a,
+.banner a {
+	color: inherit;
+	font-weight: 600;
+	text-decoration: underline;
+}
+
+.banner {
+	background: #fdecea;
+	color: var(--red);
+	border: 1px solid #f0c4be;
+	border-radius: 10px;
+	padding: 10px 12px;
+	font-size: 14px;
+	line-height: 1.6;
+}
+
+button.ghost.sync-needed {
+	background: #fdecea;
+	border-color: var(--red);
+	color: var(--red);
+	font-weight: 600;
+}
+
+code {
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	font-size: 0.95em;
+}
+
 .muted,
 .error {
 	color: var(--muted);

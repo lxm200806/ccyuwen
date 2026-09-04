@@ -126,8 +126,8 @@ import { GRADE_OPTIONS, KIND_OPTIONS, LEVEL_OPTIONS, kindLabel } from '../catalo
 
 const isAdmin = (getUser() || {}).role === 'admin'
 const intro = isAdmin
-	? '已发布库，管理员可改题目和答案。已组课程不会自动改文案；新发布可用课程页「同步新词」补进。'
-	: '已发布库，可按年级、类型、册浏览题目和答案。组课页仍不显示答案。'
+	? '已发布库，管理员可改题目和答案。已组课程不会自动改文案；新发布可用课程页「同步新词」补进。系统「默认课程」会自动补齐。'
+	: '已发布库，可按年级、类型、册浏览题目和答案。组课页仍不显示答案。选好范围后，去「组课」生成每天要默写的课。'
 
 const kindOptions = KIND_OPTIONS
 const levelOptions = LEVEL_OPTIONS
@@ -231,7 +231,7 @@ const emptyHint = computed(() => {
 	if (kind.value || level.value || grade.value || /^[1-9]\d*$/.test(String(resourceId.value || ''))) {
 		return '没有符合当前筛选的已发布知识点。可清空类型、级别、年级或册后再看。'
 	}
-	return '知识库还是空的。管理员可在「原始资料」同步教材，或在「审核」发布草稿。'
+	return '知识库还是空的。管理员请到「原始资料」同步教材；学生可先打开「我的课程」看默认课是否已有内容，或请家长联系管理员。'
 })
 
 async function loadPoints() {

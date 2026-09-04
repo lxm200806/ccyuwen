@@ -1,6 +1,7 @@
 """核心逻辑自检，不连数据库。"""
 import unittest
 
+from app.auth import demo_hints_enabled
 from app.cards import (
     decode_filters,
     encode_filters,
@@ -439,6 +440,20 @@ class EnergyTests(unittest.TestCase):
         mid_plan = plan_course_days(mid, 30)
         self.assertEqual(mid_plan["days"][0]["newEnergy"], 35)
         self.assertEqual(mid_plan["newDayCount"], 1)
+
+
+class DemoHintTests(unittest.TestCase):
+    def test_demo_hints_respect_flag_and_jwt(self):
+        import os
+        from unittest.mock import patch
+
+        with patch.dict(os.environ, {"JWT_SECRET": "ccyuwen-dev"}, clear=False):
+            os.environ.pop("DEMO_HINTS", None)
+            self.assertTrue(demo_hints_enabled())
+        with patch.dict(os.environ, {"JWT_SECRET": "prod-secret", "DEMO_HINTS": "0"}):
+            self.assertFalse(demo_hints_enabled())
+        with patch.dict(os.environ, {"JWT_SECRET": "prod-secret", "DEMO_HINTS": "yes"}):
+            self.assertTrue(demo_hints_enabled())
 
 
 if __name__ == "__main__":

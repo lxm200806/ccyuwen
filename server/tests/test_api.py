@@ -73,6 +73,74 @@ class ApiTests(unittest.TestCase):
         response = self.client.post("/api/login", json={"name": "admin", "password": "wrong"})
         self.assertEqual(response.status_code, 401)
 
+    def test_meta_demo_hints_follow_dev_jwt(self):
+        response = self.client.get("/api/meta")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("demoHints", response.json())
+        self.assertTrue(response.json()["demoHints"])
+
+    def test_draft_publish_autosyncs_default_not_custom(self):
+        prompt = "看拼音写字：chāo（默认课" + self.marker + "）"
+        imported = self.client.post(
+            "/api/drafts/import",
+            json={"text": "kind,level,grade,prompt,answer,tags,source\n" + csv_row("zi", "L4", prompt, "超")},
+            headers=self.admin,
+        )
+        self.assertEqual(imported.status_code, 200, imported.text)
+        draft_id = imported.json()["items"][0]["id"]
+
+        custom = self.client.post(
+            "/api/courses",
+            json={
+                "name": "接口课-pending-" + self.marker,
+                "note": "L4 易错字",
+                "kinds": ["zi"],
+                "levels": ["L4"],
+                "grades": ["三年级上"],
+            },
+            headers=self.kid,
+        )
+        self.assertEqual(custom.status_code, 200, custom.text)
+        custom_id = custom.json()["id"]
+        before_count = custom.json()["itemCount"]
+
+        published = self.client.post("/api/drafts/" + str(draft_id) + "/publish", headers=self.admin)
+        self.assertEqual(published.status_code, 200, published.text)
+        point_id = published.json()["id"]
+
+        courses = self.client.get("/api/courses", headers=self.kid)
+        self.assertEqual(courses.status_code, 200, courses.text)
+        payload = courses.json()
+        default = next((row for row in payload if row.get("name") == "默认课程"), None)
+        custom_row = next((row for row in payload if row.get("id") == custom_id), None)
+        self.assertIsNotNone(default)
+        self.assertIsNotNone(custom_row)
+        self.assertEqual(default["itemCount"], default["publishedCount"])
+        self.assertEqual(default.get("pendingCount"), 0)
+
+        default_today = self.client.get("/api/courses/" + str(default["id"]) + "/today", headers=self.kid)
+        self.assertEqual(default_today.status_code, 200, default_today.text)
+        self.assertGreater(default_today.json().get("itemCount") or 0, 0)
+
+        with connect() as conn:
+            attached = conn.execute(
+                "SELECT 1 FROM course_items WHERE course_id = %s AND point_id = %s",
+                (default["id"], point_id),
+            ).fetchone()
+            custom_has = conn.execute(
+                "SELECT 1 FROM course_items WHERE course_id = %s AND point_id = %s",
+                (custom_id, point_id),
+            ).fetchone()
+        self.assertIsNotNone(attached)
+        self.assertIsNone(custom_has)
+        self.assertGreaterEqual(custom_row.get("pendingCount") or 0, 1)
+        self.assertEqual(custom_row["itemCount"], before_count)
+
+        synced = self.client.post("/api/courses/" + str(custom_id) + "/sync", headers=self.kid)
+        self.assertEqual(synced.status_code, 200, synced.text)
+        self.assertGreaterEqual(synced.json()["added"], 1)
+        self.assertEqual(synced.json().get("pendingCount"), 0)
+
     def test_unauthorized(self):
         response = self.client.get("/api/me")
         self.assertEqual(response.status_code, 401)
@@ -90,7 +158,9 @@ class ApiTests(unittest.TestCase):
         default = next((row for row in courses.json() if row.get("name") == "默认课程"), None)
         self.assertIsNotNone(default)
         self.assertGreater(default["itemCount"], 0)
-        self.assertLessEqual(default["itemCount"], published)
+        self.assertEqual(default["itemCount"], published)
+        self.assertEqual(default.get("pendingCount"), 0)
+        self.assertTrue(default.get("isDefault"))
 
         catalog = self.client.get("/api/library?limit=100&offset=0&answers=1", headers=self.kid)
         self.assertEqual(catalog.status_code, 200, catalog.text)
@@ -117,6 +187,11 @@ class ApiTests(unittest.TestCase):
         )
         self.assertEqual(extra.status_code, 200, extra.text)
         self.assertEqual(extra.json()["itemCount"], published)
+        self.assertEqual(extra.json().get("pendingCount"), 0)
+
+        listed = self.client.get("/api/courses", headers=self.kid)
+        default_after = next((row for row in listed.json() if row.get("name") == "默认课程"), None)
+        self.assertEqual(default_after["itemCount"], published)
 
         synced = self.client.post("/api/courses/" + str(default["id"]) + "/sync", headers=self.kid)
         self.assertEqual(synced.status_code, 200, synced.text)

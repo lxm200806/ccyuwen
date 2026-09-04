@@ -17,7 +17,7 @@
 				</label>
 			</div>
 			<button type="button" @click="upload">上传</button>
-			<p v-if="message" class="muted">{{ message }}</p>
+			<p v-if="message" class="ok">{{ message }}</p>
 			<p v-if="error" class="error">{{ error }}</p>
 		</section>
 
@@ -130,6 +130,14 @@ async function loadResources() {
 	resources.value = await request('/resources')
 }
 
+onMounted(async () => {
+	try {
+		await loadResources()
+	} catch (err) {
+		error.value = err.message
+	}
+})
+
 async function previewResource(id) {
 	error.value = ''
 	try {
@@ -182,8 +190,4 @@ async function syncAllPacks() {
 		syncing.value = false
 	}
 }
-
-onMounted(() => {
-	loadResources()
-})
 </script>
