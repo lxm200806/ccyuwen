@@ -354,9 +354,10 @@ td {
 
 .mode-switch button span {
 	display: block;
-	font-size: 12px;
+	font-size: 13px;
 	color: var(--muted);
 	font-weight: 400;
+	margin-top: 2px;
 }
 
 .mode-switch button.active {
@@ -396,6 +397,95 @@ td {
 .recite-optional summary {
 	cursor: pointer;
 	margin-bottom: 8px;
+}
+
+.today-status {
+	margin: 0 0 10px;
+	padding: 10px 12px;
+	border-radius: 12px;
+	background: #efe3cd;
+}
+
+.today-status.done {
+	background: #e7f3ec;
+}
+
+.today-title {
+	margin: 0 0 4px;
+	font-size: 18px;
+	font-weight: 600;
+}
+
+.today-status.done .today-title,
+.result-title.ok,
+.today-title.done {
+	color: var(--green);
+}
+
+.cheer {
+	margin: 6px 0 0;
+	color: var(--ink);
+	font-size: 14px;
+}
+
+.pref-toggle {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: 8px 0 12px;
+	color: var(--ink);
+	font-size: 14px;
+}
+
+.pref-toggle input {
+	width: auto;
+}
+
+.result-box .result-title {
+	margin: 0 0 6px;
+	font-size: 20px;
+	font-weight: 600;
+}
+
+.result-title.warn {
+	color: #8a5a18;
+}
+
+.done-panel {
+	padding: 8px 0 4px;
+}
+
+.energy-help {
+	margin-top: 14px;
+	color: var(--muted);
+	font-size: 13px;
+	line-height: 1.6;
+}
+
+.energy-help summary {
+	cursor: pointer;
+}
+
+.parent-summary {
+	margin: 0 0 16px;
+	padding: 12px;
+	border-radius: 12px;
+	background: #efe3cd;
+}
+
+.parent-summary h3 {
+	margin: 0 0 8px;
+}
+
+.summary-sentence {
+	margin: 0 0 12px;
+	line-height: 1.7;
+	font-size: 15px;
+}
+
+.mastery-row {
+	grid-template-columns: 1fr 1fr;
+	margin-bottom: 16px;
 }
 
 @media (max-width: 640px) {

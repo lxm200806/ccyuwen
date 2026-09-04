@@ -6,8 +6,16 @@ from app.study_modes import (
     apply_today_mode,
     default_study_mode,
     normalize_mode,
+    resolve_default_mode,
     review_outcome,
     answer_lines,
+)
+from app.progress import (
+    build_progress,
+    kid_feedback,
+    mastery_counts,
+    parent_copy,
+    progress_status,
 )
 from app.cards import (
     decode_filters,
@@ -464,6 +472,14 @@ class StudyModeTests(unittest.TestCase):
             default_study_mode({"groups": [{"role": "new"}], "reviewEnergy": 0, "newEnergy": 16}),
             "learn",
         )
+        mixed = {"groups": [{"role": "new"}, {"role": "review"}], "reviewEnergy": 8, "newEnergy": 16}
+        self.assertEqual(default_study_mode(mixed), "learn")
+        self.assertEqual(resolve_default_mode(mixed, False), "learn")
+        self.assertEqual(resolve_default_mode(mixed, True), "test")
+        self.assertEqual(
+            resolve_default_mode({"groups": [{"role": "new"}], "reviewEnergy": 0, "newEnergy": 16}, True),
+            "learn",
+        )
 
     def test_test_mode_prefers_review_groups(self):
         groups = [
@@ -528,6 +544,98 @@ class StudyModeTests(unittest.TestCase):
     def test_answer_lines(self):
         self.assertEqual(answer_lines("春眠不觉晓。处处闻啼鸟。"), ["春眠不觉晓。", "处处闻啼鸟。"])
         self.assertEqual(answer_lines("春风"), ["春风"])
+
+
+class ProgressTests(unittest.TestCase):
+    def test_status_and_student_copy(self):
+        remaining = build_progress(
+            {"cards": 8, "tasks": 1, "newEnergy": 16, "reviewEnergy": 0, "newBudget": 30, "reviewBudget": 30},
+            [],
+            item_count=10,
+        )
+        self.assertEqual(progress_status(10, 8, 0), "remaining")
+        self.assertEqual(remaining["status"], "remaining")
+        self.assertIn("还差新学 16 能", remaining["title"])
+        self.assertFalse(remaining["todayDone"])
+
+        done = build_progress(
+            {"cards": 0, "tasks": 0, "newEnergy": 0, "reviewEnergy": 0, "newBudget": 30, "reviewBudget": 30},
+            [{"point_id": 1, "quality": 5, "correct": True, "kind": "zi"}],
+            item_count=10,
+        )
+        self.assertEqual(done["status"], "done")
+        self.assertEqual(done["title"], "今天练完了")
+        self.assertTrue(done["todayDone"])
+        self.assertEqual(done["todayPracticed"], 1)
+        self.assertEqual(done["todayDoneCount"], 1)
+        self.assertEqual(done["todayAccuracy"], 100)
+
+        idle = build_progress(
+            {"cards": 0, "tasks": 0, "newEnergy": 0, "reviewEnergy": 0},
+            [],
+            item_count=10,
+        )
+        self.assertEqual(idle["status"], "idle")
+        self.assertIn("没有要练", idle["title"])
+
+        empty = build_progress({"cards": 0}, [], item_count=0)
+        self.assertEqual(empty["status"], "empty")
+
+    def test_parent_summary_and_weak_kinds(self):
+        logs = [
+            {"point_id": 1, "quality": 5, "correct": True, "kind": "zi"},
+            {"point_id": 2, "quality": 1, "correct": False, "kind": "idiom"},
+            {"point_id": 2, "quality": 5, "correct": True, "kind": "idiom"},
+        ]
+        progress = build_progress(
+            {"cards": 4, "newEnergy": 8, "reviewEnergy": 0, "newBudget": 30, "reviewBudget": 30},
+            logs,
+            item_count=20,
+            mastered=3,
+            total=20,
+        )
+        self.assertEqual(progress["todayPracticed"], 2)
+        self.assertEqual(progress["todayStreak"], 1)
+        self.assertEqual(progress["weakKinds"][0]["label"], "词语")
+        self.assertIn("今天已练 2 条", progress["summary"])
+        self.assertIn("正确率", progress["summary"])
+        self.assertIn("还差新学 8 能", progress["summary"])
+        self.assertIn("已掌握 3 / 20", progress["summary"])
+        sentence = parent_copy("done", 4, 75, [{"label": "易错字"}], 0, 0, mastered=1, total=8)
+        self.assertIn("今天练完了", sentence)
+        self.assertIn("易错字", sentence)
+
+    def test_kid_feedback_by_mode(self):
+        wrong = {"quality": 1, "correct": False, "chars": [{"char": "待", "ok": False}, {"char": "兔", "ok": True}]}
+        peeked = kid_feedback("learn", wrong, revealed=True, update_sm2=True)
+        self.assertEqual(peeked["title"], "看过答案了")
+        self.assertIn("模糊", peeked["hint"])
+        self.assertEqual(peeked["wrongChars"], [])
+
+        failed = kid_feedback("learn", wrong, revealed=False, update_sm2=True)
+        self.assertEqual(failed["title"], "这题先记下")
+        self.assertIn("待", failed["hint"])
+        self.assertIn("还会再练", failed["next"])
+
+        passed = kid_feedback("test", {"quality": 5, "correct": True, "chars": []}, revealed=False)
+        self.assertEqual(passed["title"], "全对！")
+
+        recite = kid_feedback("recite", {"quality": 5, "correct": True}, revealed=False, update_sm2=False)
+        self.assertEqual(recite["title"], "读得对")
+        self.assertIn("不改下次", recite["hint"])
+
+    def test_mastery_counts(self):
+        counts = mastery_counts(
+            [
+                {"kind": "zi", "mastered": True, "last": "2026-09-01", "study_count": 2, "review_count": 1, "error_count": 0},
+                {"kind": "idiom", "mastered": False, "last": "2026-09-01", "study_count": 1, "review_count": 0, "error_count": 2},
+                {"kind": "zi", "mastered": False, "last": None, "study_count": 0, "review_count": 0, "error_count": 0},
+            ]
+        )
+        self.assertEqual(counts["mastered"], 1)
+        self.assertEqual(counts["learning"], 1)
+        self.assertEqual(counts["unseen"], 1)
+        self.assertEqual(counts["weakKinds"][0]["label"], "词语")
 
 
 class DemoHintTests(unittest.TestCase):
