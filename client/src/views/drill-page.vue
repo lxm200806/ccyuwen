@@ -82,7 +82,7 @@
 						{{ resultLabel }}
 					</p>
 					<p>标准答案：{{ result.answer }}</p>
-					<p>
+					<p v-if="!result.revealed">
 						对照：
 						<span
 							v-for="(ch, i) in result.chars"
