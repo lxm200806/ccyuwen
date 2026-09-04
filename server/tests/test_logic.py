@@ -2,6 +2,13 @@
 import unittest
 
 from app.auth import demo_hints_enabled
+from app.study_modes import (
+    apply_today_mode,
+    default_study_mode,
+    normalize_mode,
+    review_outcome,
+    answer_lines,
+)
 from app.cards import (
     decode_filters,
     encode_filters,
@@ -401,6 +408,8 @@ class GroupTests(unittest.TestCase):
         picked_ids = [row["id"] for group in planned["groups"] for row in group["rows"]]
         self.assertEqual(picked_ids, [5, 1, 2, 3, 4])
         self.assertNotIn(6, picked_ids)
+        self.assertEqual(planned["groups"][0]["role"], "review")
+        self.assertEqual(planned["groups"][1]["role"], "new")
 
 
 class EnergyTests(unittest.TestCase):
@@ -440,6 +449,85 @@ class EnergyTests(unittest.TestCase):
         mid_plan = plan_course_days(mid, 30)
         self.assertEqual(mid_plan["days"][0]["newEnergy"], 35)
         self.assertEqual(mid_plan["newDayCount"], 1)
+
+
+class StudyModeTests(unittest.TestCase):
+    def test_normalize_and_default(self):
+        self.assertEqual(normalize_mode("TEST"), "test")
+        self.assertEqual(normalize_mode("背诵"), "recite")
+        self.assertEqual(normalize_mode("nope"), "learn")
+        self.assertEqual(
+            default_study_mode({"groups": [{"role": "review"}], "reviewEnergy": 8, "newEnergy": 16}),
+            "test",
+        )
+        self.assertEqual(
+            default_study_mode({"groups": [{"role": "new"}], "reviewEnergy": 0, "newEnergy": 16}),
+            "learn",
+        )
+
+    def test_test_mode_prefers_review_groups(self):
+        groups = [
+            {"role": "review", "energy": 8, "rows": [1]},
+            {"role": "new", "energy": 16, "rows": [2, 3]},
+        ]
+        planned = apply_today_mode({"groups": groups, "due": 1, "fresh": 1}, "test")
+        self.assertEqual(len(planned["groups"]), 1)
+        self.assertEqual(planned["groups"][0]["role"], "review")
+        self.assertEqual(planned["reviewEnergy"], 8)
+        self.assertEqual(planned["newEnergy"], 0)
+        self.assertTrue(planned["energyCharged"])
+
+        fallback = apply_today_mode({"groups": [{"role": "new", "energy": 4, "rows": [1]}]}, "test")
+        self.assertEqual(len(fallback["groups"]), 1)
+        self.assertEqual(fallback["newEnergy"], 4)
+
+    def test_learn_keeps_mixed_queue(self):
+        groups = [
+            {"role": "review", "energy": 8, "rows": [1]},
+            {"role": "new", "energy": 16, "rows": [2, 3]},
+        ]
+        planned = apply_today_mode({"groups": groups}, "learn")
+        self.assertEqual(len(planned["groups"]), 2)
+        self.assertEqual(planned["newEnergy"], 16)
+        self.assertEqual(planned["reviewEnergy"], 8)
+
+    def test_recite_zero_energy(self):
+        groups = [{"role": "new", "energy": 16, "rows": [1, 2]}]
+        planned = apply_today_mode({"groups": groups}, "recite")
+        self.assertEqual(planned["newEnergy"], 0)
+        self.assertEqual(planned["reviewEnergy"], 0)
+        self.assertFalse(planned["energyCharged"])
+        self.assertEqual(planned["cards"], 2)
+
+    def test_learn_reveal_is_soft_quality_3(self):
+        outcome = review_outcome("learn", {"quality": 1, "correct": False}, revealed=True)
+        self.assertEqual(outcome["quality"], 3)
+        self.assertTrue(outcome["update_sm2"])
+        self.assertFalse(outcome["correct"])
+        first = schedule(None, 5, "2026-09-02")
+        peeked = schedule(first, outcome["quality"], "2026-09-03")
+        failed = schedule(first, 1, "2026-09-03")
+        self.assertEqual(peeked["n"], 2)
+        self.assertEqual(peeked["lapses"], 0)
+        self.assertEqual(failed["n"], 0)
+        self.assertEqual(failed["lapses"], 1)
+        self.assertLess(peeked["ef"], first["ef"])
+
+    def test_test_reveal_rejected_and_strict_pass(self):
+        blocked = review_outcome("test", {"quality": 1, "correct": False}, revealed=True)
+        self.assertFalse(blocked["ok"])
+        passed = review_outcome("test", {"quality": 5, "correct": True}, revealed=False)
+        self.assertEqual(passed["quality"], 5)
+        self.assertTrue(passed["update_sm2"])
+
+    def test_recite_skips_sm2(self):
+        outcome = review_outcome("recite", {"quality": 5, "correct": True}, revealed=False)
+        self.assertTrue(outcome["ok"])
+        self.assertFalse(outcome["update_sm2"])
+
+    def test_answer_lines(self):
+        self.assertEqual(answer_lines("春眠不觉晓。处处闻啼鸟。"), ["春眠不觉晓。", "处处闻啼鸟。"])
+        self.assertEqual(answer_lines("春风"), ["春风"])
 
 
 class DemoHintTests(unittest.TestCase):

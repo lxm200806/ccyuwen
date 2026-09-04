@@ -333,6 +333,71 @@ td {
 	border-top: 1px solid var(--line);
 }
 
+.mode-switch {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin: 0 0 12px;
+}
+
+.mode-switch button {
+	flex: 1 1 120px;
+	min-height: 52px;
+	padding: 8px 12px;
+	border-radius: 14px;
+	background: #efe3cd;
+	color: var(--ink);
+	border: 1px solid transparent;
+	text-align: left;
+	line-height: 1.25;
+}
+
+.mode-switch button span {
+	display: block;
+	font-size: 12px;
+	color: var(--muted);
+	font-weight: 400;
+}
+
+.mode-switch button.active {
+	background: var(--ink);
+	color: #fff;
+}
+
+.mode-switch button.active span {
+	color: #efe3cd;
+}
+
+.recite-lines {
+	margin: 12px 0;
+}
+
+.recite-line {
+	min-height: 36px;
+	margin: 6px 0;
+	padding: 8px 12px;
+	border-radius: 10px;
+	background: #fff;
+	border: 1px solid var(--line);
+}
+
+.recite-line.covered {
+	color: var(--muted);
+	background: repeating-linear-gradient(-45deg, #efe3cd, #efe3cd 8px, #fffaf1 8px, #fffaf1 16px);
+	user-select: none;
+}
+
+.recite-optional {
+	margin-top: 14px;
+	color: var(--muted);
+	font-size: 14px;
+}
+
+.recite-optional summary {
+	cursor: pointer;
+	margin-bottom: 8px;
+}
+
 @media (max-width: 640px) {
 	.row,
 	.stats {
