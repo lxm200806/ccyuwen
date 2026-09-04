@@ -7,6 +7,7 @@ from app.cards import (
     fill_group_fields,
     page_args,
     parse_import,
+    parse_resource_filter,
     plan_course_days,
     plan_today_groups,
     point_energy,
@@ -85,6 +86,15 @@ class CardTests(unittest.TestCase):
         self.assertEqual(decode_filters("poem,L9,zi", ("poem", "idiom", "zi")), ["poem", "zi"])
         self.assertEqual(page_args(0, -3), (1, 0))
         self.assertEqual(page_args(9999, 10), (500, 10))
+        self.assertIsNone(parse_resource_filter(None))
+        self.assertIsNone(parse_resource_filter(""))
+        self.assertIsNone(parse_resource_filter("all"))
+        self.assertIsNone(parse_resource_filter("undefined"))
+        self.assertEqual(parse_resource_filter("0"), 0)
+        self.assertEqual(parse_resource_filter("unlinked"), 0)
+        self.assertEqual(parse_resource_filter(None, unlinked=True), 0)
+        self.assertEqual(parse_resource_filter("12"), 12)
+        self.assertIsNone(parse_resource_filter("abc"))
 
 
 class Grade3aTests(unittest.TestCase):

@@ -23,6 +23,7 @@ from .cards import (
     normalize_grade,
     page_args,
     parse_energy_limit,
+    parse_resource_filter,
     parse_import,
     plan_course_days,
     plan_today_groups,
@@ -222,8 +223,10 @@ def list_resources(user=Depends(current_user)):
                 """,
                 (user["id"],),
             ).fetchall()
-        with conn.cursor() as cur:
-            status_by_slug = {spec["slug"]: pack_status(cur, spec) for spec in PACKS}
+        status_by_slug = {}
+        if user["role"] == "admin":
+            with conn.cursor() as cur:
+                status_by_slug = {spec["slug"]: pack_status(cur, spec) for spec in PACKS}
     items = [decorate_resource(row, status_by_slug) for row in rows]
     if user["role"] != "admin":
         for item in items:
@@ -522,7 +525,8 @@ def library(
     kinds: str | None = None,
     levels: str | None = None,
     grades: str | None = None,
-    resourceId: int | None = None,
+    resourceId: str | None = None,
+    unlinked: bool = False,
     limit: int = 200,
     offset: int = 0,
     answers: bool = False,
@@ -549,11 +553,12 @@ def library(
     if grade_list:
         where_sql += " AND k.grade = ANY(%s)"
         args.append(grade_list)
-    if resourceId == 0:
+    resource_filter = parse_resource_filter(resourceId, unlinked)
+    if resource_filter == 0:
         where_sql += " AND k.source_resource_id IS NULL"
-    elif resourceId:
+    elif resource_filter:
         where_sql += " AND k.source_resource_id = %s"
-        args.append(resourceId)
+        args.append(resource_filter)
     safe_limit, safe_offset = page_args(limit, offset)
     with connect() as conn:
         total = conn.execute("SELECT COUNT(*) AS n" + where_sql, args).fetchone()["n"]
@@ -1064,7 +1069,7 @@ def library_coverage(user=Depends(current_user)):
         ).fetchone()["n"]
         by_kind = conn.execute(
             """
-            SELECT p.kind, COUNT(*) AS total,
+            SELECT p.kind, COUNT(DISTINCT p.id) AS total,
                    COUNT(DISTINCT CASE WHEN c.user_id = %s THEN i.point_id END) AS in_course
             FROM knowledge_published p
             LEFT JOIN course_items i ON i.point_id = p.id
@@ -1076,7 +1081,7 @@ def library_coverage(user=Depends(current_user)):
         ).fetchall()
         by_grade = conn.execute(
             """
-            SELECT COALESCE(NULLIF(p.grade, ''), '未分年级') AS grade, COUNT(*) AS total,
+            SELECT COALESCE(NULLIF(p.grade, ''), '未分年级') AS grade, COUNT(DISTINCT p.id) AS total,
                    COUNT(DISTINCT CASE WHEN c.user_id = %s THEN i.point_id END) AS in_course
             FROM knowledge_published p
             LEFT JOIN course_items i ON i.point_id = p.id
