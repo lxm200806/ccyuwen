@@ -23,7 +23,7 @@
 
 		<section class="card">
 			<h2>已备份的原始材料</h2>
-			<p class="muted">改 <code>raw/部编…册.json</code> 或对应 md 后刷新本页。系统用内容指纹对比上次同步：灰色「未同步」、红色「有更新」、绿色「已同步」。文件版本大于已同步版本，也说明内容变了。</p>
+			<p class="muted">改 <code>raw/部编…册.json</code>、<code>raw/idioms/小学成语.json</code> 或对应 md 后刷新本页。系统用内容指纹对比上次同步：灰色「未同步」、红色「有更新」、绿色「已同步」。文件版本大于已同步版本，也说明内容变了。十二册和小学成语同步后直接进知识库，不用审核。小学成语课内条目按年级，分日积月累 / 课文。</p>
 			<div class="course-actions">
 				<button type="button" :disabled="syncing" @click="syncIncremental">增量同步</button>
 				<button class="ghost" type="button" :disabled="syncing" @click="syncAllPacks">一键重新同步</button>
@@ -182,7 +182,7 @@ async function syncAllPacks() {
 	syncing.value = true
 	try {
 		const result = await request('/resources/sync-all', { method: 'POST' })
-		message.value = '重新同步十二册：新增 ' + result.inserted + '，更新 ' + result.updated
+		message.value = '重新同步官方材料：新增 ' + result.inserted + '，更新 ' + result.updated
 		await loadResources()
 	} catch (err) {
 		error.value = err.message

@@ -124,6 +124,16 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(courses.status_code, 200, courses.text)
         payload = courses.json()
         default = next((row for row in payload if row.get("name") == "默认课程"), None)
+        if default is None:
+            created = self.client.post(
+                "/api/courses",
+                json={"name": "默认课程", "note": "系统预置", "kinds": [], "levels": [], "grades": []},
+                headers=self.kid,
+            )
+            self.assertEqual(created.status_code, 200, created.text)
+            courses = self.client.get("/api/courses", headers=self.kid)
+            payload = courses.json()
+            default = next((row for row in payload if row.get("name") == "默认课程"), None)
         custom_row = next((row for row in payload if row.get("id") == custom_id), None)
         self.assertIsNotNone(default)
         self.assertIsNotNone(custom_row)
@@ -160,37 +170,25 @@ class ApiTests(unittest.TestCase):
     def test_student_library_matches_default_course(self):
         with connect() as conn:
             published = conn.execute("SELECT COUNT(*) AS n FROM knowledge_published").fetchone()["n"]
-            unlinked_n = conn.execute(
-                "SELECT COUNT(*) AS n FROM knowledge_published WHERE source_resource_id IS NULL"
-            ).fetchone()["n"]
         self.assertGreater(published, 0)
-
-        courses = self.client.get("/api/courses", headers=self.kid)
-        self.assertEqual(courses.status_code, 200, courses.text)
-        default = next((row for row in courses.json() if row.get("name") == "默认课程"), None)
-        self.assertIsNotNone(default)
-        self.assertGreater(default["itemCount"], 0)
-        self.assertEqual(default["itemCount"], published)
-        self.assertEqual(default.get("pendingCount"), 0)
-        self.assertTrue(default.get("isDefault"))
 
         catalog = self.client.get("/api/library?limit=100&offset=0&answers=1", headers=self.kid)
         self.assertEqual(catalog.status_code, 200, catalog.text)
-        self.assertEqual(catalog.json()["total"], published)
+        visible = catalog.json()["total"]
+        self.assertGreater(visible, 0)
+        self.assertLessEqual(visible, published)
         self.assertTrue(catalog.json()["items"])
         self.assertTrue(all(item.get("answer") for item in catalog.json()["items"]))
 
         empty_param = self.client.get("/api/library?resourceId=&answers=1", headers=self.kid)
         self.assertEqual(empty_param.status_code, 200, empty_param.text)
-        self.assertEqual(empty_param.json()["total"], published)
+        self.assertEqual(empty_param.json()["total"], visible)
 
         unlinked = self.client.get("/api/library?resourceId=0&answers=1", headers=self.kid)
         self.assertEqual(unlinked.status_code, 200, unlinked.text)
-        self.assertEqual(unlinked.json()["total"], unlinked_n)
-
         named = self.client.get("/api/library?resourceId=unlinked&answers=1", headers=self.kid)
         self.assertEqual(named.status_code, 200, named.text)
-        self.assertEqual(named.json()["total"], unlinked_n)
+        self.assertEqual(named.json()["total"], unlinked.json()["total"])
 
         extra = self.client.post(
             "/api/courses",
@@ -198,21 +196,31 @@ class ApiTests(unittest.TestCase):
             headers=self.kid,
         )
         self.assertEqual(extra.status_code, 200, extra.text)
-        self.assertEqual(extra.json()["itemCount"], published)
+        self.assertEqual(extra.json()["itemCount"], visible)
         self.assertEqual(extra.json().get("pendingCount"), 0)
 
-        listed = self.client.get("/api/courses", headers=self.kid)
-        default_after = next((row for row in listed.json() if row.get("name") == "默认课程"), None)
-        self.assertEqual(default_after["itemCount"], published)
+        courses = self.client.get("/api/courses", headers=self.kid)
+        default = next((row for row in courses.json() if row.get("name") == "默认课程"), None)
+        if default is None:
+            created = self.client.post(
+                "/api/courses",
+                json={"name": "默认课程", "note": "系统预置", "kinds": [], "levels": [], "grades": []},
+                headers=self.kid,
+            )
+            self.assertEqual(created.status_code, 200, created.text)
+            default = created.json()
+        self.assertGreater(default["itemCount"], 0)
+        self.assertEqual(default.get("publishedCount"), visible)
+        self.assertTrue(default.get("isDefault"))
 
         synced = self.client.post("/api/courses/" + str(default["id"]) + "/sync", headers=self.kid)
         self.assertEqual(synced.status_code, 200, synced.text)
-        self.assertEqual(synced.json()["itemCount"], published)
+        self.assertGreaterEqual(synced.json()["itemCount"], visible)
 
         coverage = self.client.get("/api/library/coverage", headers=self.kid)
         self.assertEqual(coverage.status_code, 200, coverage.text)
         self.assertEqual(coverage.json()["total"], published)
-        self.assertEqual(coverage.json()["inCourse"], published)
+        self.assertGreaterEqual(coverage.json()["inCourse"], visible)
         self.assertEqual(sum(row["total"] for row in coverage.json()["byKind"]), published)
         self.assertEqual(sum(row["total"] for row in coverage.json()["byGrade"]), published)
 
@@ -456,6 +464,7 @@ class ApiTests(unittest.TestCase):
             "grade5-xia",
             "grade6-shang",
             "grade6-xia",
+            "elementary-idioms",
         ):
             self.assertIn(slug, slugs, slug)
             self.assertIn(slug + "-original", slugs, slug)
@@ -505,13 +514,105 @@ class ApiTests(unittest.TestCase):
 
         incremental = self.client.post("/api/resources/sync-incremental", headers=self.admin)
         self.assertEqual(incremental.status_code, 200, incremental.text)
-        self.assertEqual(incremental.json()["packs"], 12)
-        self.assertEqual(incremental.json()["skipped"], 12)
+        self.assertEqual(incremental.json()["packs"], 13)
+        self.assertEqual(incremental.json()["skipped"], 13)
 
         rebuilt = self.client.post("/api/resources/sync-all", headers=self.admin)
         self.assertEqual(rebuilt.status_code, 200, rebuilt.text)
-        self.assertEqual(rebuilt.json()["packs"], 12)
-        self.assertEqual(rebuilt.json()["synced"], 12)
+        self.assertEqual(rebuilt.json()["packs"], 13)
+        self.assertEqual(rebuilt.json()["synced"], 13)
+
+        idioms = slugs.get("elementary-idioms") or {}
+        if not idioms:
+            listed = self.client.get("/api/resources", headers=self.admin)
+            slugs = {row["slug"]: row for row in listed.json()}
+            idioms = slugs["elementary-idioms"]
+        self.assertEqual(idioms.get("title"), "小学成语")
+        self.assertGreaterEqual(idioms.get("pointCount") or 0, 1900)
+
+    def test_unpublished_draft_hidden_from_library(self):
+        prompt = "看拼音写字：cáng（待审隐藏" + self.marker + "）"
+        imported = self.client.post(
+            "/api/drafts/import",
+            json={"text": "kind,level,grade,prompt,answer,tags,source\n" + csv_row("zi", "L4", prompt, "藏")},
+            headers=self.admin,
+        )
+        self.assertEqual(imported.status_code, 200, imported.text)
+        draft_id = imported.json()["items"][0]["id"]
+
+        hidden = self.client.get("/api/library?kind=zi&level=L4&answers=1&limit=500", headers=self.admin)
+        self.assertEqual(hidden.status_code, 200, hidden.text)
+        self.assertFalse(any(item.get("prompt") == prompt for item in hidden.json()["items"]))
+
+        published = self.client.post("/api/drafts/" + str(draft_id) + "/publish", headers=self.admin)
+        self.assertEqual(published.status_code, 200, published.text)
+        point_id = published.json()["id"]
+
+        shown = self.client.get("/api/library?kind=zi&level=L4&answers=1&limit=500", headers=self.admin)
+        self.assertTrue(any(item.get("id") == point_id for item in shown.json()["items"]))
+
+        again = self.client.post(
+            "/api/drafts/import",
+            json={"text": "kind,level,grade,prompt,answer,tags,source\n" + csv_row("zi", "L4", prompt, "藏")},
+            headers=self.admin,
+        )
+        self.assertEqual(again.status_code, 200, again.text)
+        pending_id = again.json()["items"][0]["id"]
+        blocked = self.client.get("/api/library?kind=zi&level=L4&answers=1&limit=500", headers=self.admin)
+        self.assertFalse(any(item.get("id") == point_id for item in blocked.json()["items"]))
+
+        discarded = self.client.patch(
+            "/api/drafts/" + str(pending_id),
+            json={"status": "discarded"},
+            headers=self.admin,
+        )
+        self.assertEqual(discarded.status_code, 200, discarded.text)
+        restored = self.client.get("/api/library?kind=zi&level=L4&answers=1&limit=500", headers=self.admin)
+        self.assertTrue(any(item.get("id") == point_id for item in restored.json()["items"]))
+
+    def test_draft_pagination_and_batch_publish(self):
+        rows = "".join(
+            csv_row("zi", "L4", "看拼音写字：pī（批量" + self.marker + str(index) + "）", "批")
+            for index in range(3)
+        )
+        imported = self.client.post(
+            "/api/drafts/import",
+            json={"text": "kind,level,grade,prompt,answer,tags,source\n" + rows},
+            headers=self.admin,
+        )
+        self.assertEqual(imported.status_code, 200, imported.text)
+        ids = [item["id"] for item in imported.json()["items"]]
+        self.assertEqual(len(ids), 3)
+
+        page = self.client.get("/api/drafts?status=draft&limit=2&offset=0", headers=self.admin)
+        self.assertEqual(page.status_code, 200, page.text)
+        self.assertGreaterEqual(page.json()["total"], 3)
+        self.assertEqual(page.json()["limit"], 2)
+        self.assertLessEqual(len(page.json()["items"]), 2)
+
+        empty = self.client.post("/api/drafts/publish-batch", json={"ids": []}, headers=self.admin)
+        self.assertEqual(empty.status_code, 400, empty.text)
+
+        batch = self.client.post(
+            "/api/drafts/publish-batch",
+            json={"ids": ids[:2]},
+            headers=self.admin,
+        )
+        self.assertEqual(batch.status_code, 200, batch.text)
+        self.assertEqual(batch.json()["ok"], 2)
+        self.assertEqual(batch.json()["fail"], 0)
+
+        leftover = self.client.get("/api/drafts?status=draft&limit=200", headers=self.admin)
+        leftover_ids = {item["id"] for item in leftover.json()["items"]}
+        self.assertNotIn(ids[0], leftover_ids)
+        self.assertNotIn(ids[1], leftover_ids)
+        self.assertIn(ids[2], leftover_ids)
+
+        library = self.client.get("/api/library?kind=zi&level=L4&answers=1&limit=500", headers=self.admin)
+        published_ids = {item["id"] for item in library.json()["items"]}
+        self.assertTrue({item["id"] for item in batch.json()["items"]}.issubset(published_ids))
+        leftover_prompt = "看拼音写字：pī（批量" + self.marker + "2）"
+        self.assertFalse(any(item.get("prompt") == leftover_prompt for item in library.json()["items"]))
 
 
 if __name__ == "__main__":

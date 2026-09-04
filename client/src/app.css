@@ -488,6 +488,44 @@ td {
 	margin-bottom: 16px;
 }
 
+.pager {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: center;
+	gap: 12px;
+	margin-top: 16px;
+}
+
+.pager button {
+	min-width: 88px;
+}
+
+.batch-bar {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 10px;
+	align-items: center;
+	margin: 8px 0 12px;
+}
+
+.lib-pick {
+	display: flex;
+	gap: 10px;
+	align-items: flex-start;
+}
+
+.lib-pick > input {
+	width: auto;
+	margin-top: 6px;
+	flex: 0 0 auto;
+}
+
+.lib-pick .lib-body {
+	flex: 1 1 auto;
+	min-width: 0;
+}
+
 @media (max-width: 640px) {
 	.row,
 	.stats {

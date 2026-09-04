@@ -86,6 +86,138 @@ class ImportBody(BaseModel):
     resourceId: int | None = None
 
 
+class DraftIdsBody(BaseModel):
+    ids: list[int] = Field(default_factory=list)
+
+
+def pending_draft_exclusion(alias="k"):
+    """Hide published rows that still have a matching unpublished draft."""
+    return f"""
+ AND NOT EXISTS (
+    SELECT 1 FROM knowledge_draft d
+    WHERE d.status = 'draft'
+      AND (
+        (
+          NULLIF(BTRIM(COALESCE(d.point_key, '')), '') IS NOT NULL
+          AND NULLIF(BTRIM(COALESCE({alias}.point_key, '')), '') IS NOT NULL
+          AND d.point_key = {alias}.point_key
+        )
+        OR (d.prompt = {alias}.prompt AND d.answer = {alias}.answer)
+      )
+ )
+"""
+
+
+def unique_positive_ids(values):
+    ids = []
+    seen = set()
+    for item in values or []:
+        try:
+            value = int(item)
+        except (TypeError, ValueError):
+            continue
+        if value > 0 and value not in seen:
+            seen.add(value)
+            ids.append(value)
+    return ids
+
+
+def publish_draft_row(conn, draft_id):
+    draft = conn.execute("SELECT * FROM knowledge_draft WHERE id = %s", (draft_id,)).fetchone()
+    if not draft or draft["status"] == "discarded":
+        raise HTTPException(status_code=404, detail="草稿不可发布")
+    if draft["status"] == "published":
+        existing = conn.execute(
+            "SELECT * FROM knowledge_published WHERE draft_id = %s",
+            (draft_id,),
+        ).fetchone()
+        if existing:
+            return existing
+        raise HTTPException(status_code=404, detail="草稿不可发布")
+    error = validate_card(draft["kind"], draft["prompt"], draft["answer"])
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+    grouped = fill_group_fields(
+        {
+            "key": draft.get("point_key") or "",
+            "kind": draft["kind"],
+            "level": draft["level"],
+            "grade": normalize_grade(draft.get("grade")),
+            "prompt": draft["prompt"],
+            "answer": draft["answer"],
+            "tags": draft.get("tags") or "",
+            "source": draft.get("source") or "",
+        }
+    )
+    existing = None
+    key = str(grouped.get("key") or draft.get("point_key") or "").strip()
+    if key:
+        existing = conn.execute(
+            "SELECT id FROM knowledge_published WHERE point_key = %s",
+            (key,),
+        ).fetchone()
+    if not existing:
+        existing = conn.execute(
+            "SELECT id FROM knowledge_published WHERE prompt = %s AND answer = %s",
+            (draft["prompt"], draft["answer"]),
+        ).fetchone()
+    if existing:
+        conn.execute(
+            """
+            UPDATE knowledge_published
+            SET kind=%s, level=%s, grade=%s, prompt=%s, answer=%s, tags=%s, source=%s,
+                source_resource_id=%s, draft_id=%s, point_key=%s, group_key=%s, sub_group_key=%s,
+                published_at=NOW()
+            WHERE id=%s
+            """,
+            (
+                draft["kind"],
+                draft["level"],
+                grouped["grade"],
+                draft["prompt"],
+                draft["answer"],
+                draft["tags"],
+                draft["source"],
+                draft["source_resource_id"],
+                draft["id"],
+                key,
+                grouped["group_key"],
+                grouped["sub_group_key"],
+                existing["id"],
+            ),
+        )
+        published_id = existing["id"]
+    else:
+        published = conn.execute(
+            """
+            INSERT INTO knowledge_published
+                (kind, level, grade, prompt, answer, tags, source, source_resource_id, draft_id,
+                 point_key, group_key, sub_group_key)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                draft["kind"],
+                draft["level"],
+                grouped["grade"],
+                draft["prompt"],
+                draft["answer"],
+                draft["tags"],
+                draft["source"],
+                draft["source_resource_id"],
+                draft["id"],
+                key,
+                grouped["group_key"],
+                grouped["sub_group_key"],
+            ),
+        ).fetchone()
+        published_id = published["id"]
+    conn.execute("UPDATE knowledge_draft SET status = 'published' WHERE id = %s", (draft_id,))
+    with conn.cursor() as cur:
+        attach_default_course(cur, [published_id])
+    return conn.execute("SELECT * FROM knowledge_published WHERE id = %s", (published_id,)).fetchone()
+
+
 class DraftPatch(BaseModel):
     kind: str | None = None
     level: str | None = None
@@ -454,84 +586,29 @@ def patch_draft(draft_id: int, body: DraftPatch, user=Depends(require_admin)):
         return conn.execute("SELECT * FROM knowledge_draft WHERE id = %s", (draft_id,)).fetchone()
 
 
+@app.post("/api/drafts/publish-batch")
+def publish_drafts_batch(body: DraftIdsBody, user=Depends(require_admin)):
+    ids = unique_positive_ids(body.ids)
+    if not ids:
+        raise HTTPException(status_code=400, detail="请选择要发布的草稿")
+    published = []
+    errors = []
+    with connect() as conn:
+        for draft_id in ids:
+            try:
+                published.append(publish_draft_row(conn, draft_id))
+            except HTTPException as exc:
+                errors.append({"id": draft_id, "detail": exc.detail})
+        conn.commit()
+    return {"ok": len(published), "fail": len(errors), "items": published, "errors": errors}
+
+
 @app.post("/api/drafts/{draft_id}/publish")
 def publish_draft(draft_id: int, user=Depends(require_admin)):
     with connect() as conn:
-        draft = conn.execute("SELECT * FROM knowledge_draft WHERE id = %s", (draft_id,)).fetchone()
-        if not draft or draft["status"] == "discarded":
-            raise HTTPException(status_code=404, detail="草稿不可发布")
-        error = validate_card(draft["kind"], draft["prompt"], draft["answer"])
-        if error:
-            raise HTTPException(status_code=400, detail=error)
-        grouped = fill_group_fields(
-            {
-                "key": draft.get("point_key") or "",
-                "kind": draft["kind"],
-                "level": draft["level"],
-                "grade": normalize_grade(draft.get("grade")),
-                "prompt": draft["prompt"],
-                "answer": draft["answer"],
-                "tags": draft.get("tags") or "",
-                "source": draft.get("source") or "",
-            }
-        )
-        existing = conn.execute(
-            "SELECT id FROM knowledge_published WHERE prompt = %s AND answer = %s",
-            (draft["prompt"], draft["answer"]),
-        ).fetchone()
-        if existing:
-            conn.execute(
-                """
-                UPDATE knowledge_published
-                SET kind=%s, level=%s, grade=%s, tags=%s, source=%s, source_resource_id=%s,
-                    draft_id=%s, point_key=%s, group_key=%s, sub_group_key=%s, published_at=NOW()
-                WHERE id=%s
-                """,
-                (
-                    draft["kind"],
-                    draft["level"],
-                    grouped["grade"],
-                    draft["tags"],
-                    draft["source"],
-                    draft["source_resource_id"],
-                    draft["id"],
-                    grouped.get("key") or draft.get("point_key") or "",
-                    grouped["group_key"],
-                    grouped["sub_group_key"],
-                    existing["id"],
-                ),
-            )
-            published_id = existing["id"]
-        else:
-            published = conn.execute(
-                """
-                INSERT INTO knowledge_published
-                    (kind, level, grade, prompt, answer, tags, source, source_resource_id, draft_id,
-                     point_key, group_key, sub_group_key)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id
-                """,
-                (
-                    draft["kind"],
-                    draft["level"],
-                    grouped["grade"],
-                    draft["prompt"],
-                    draft["answer"],
-                    draft["tags"],
-                    draft["source"],
-                    draft["source_resource_id"],
-                    draft["id"],
-                    grouped.get("key") or draft.get("point_key") or "",
-                    grouped["group_key"],
-                    grouped["sub_group_key"],
-                ),
-            ).fetchone()
-            published_id = published["id"]
-        conn.execute("UPDATE knowledge_draft SET status = 'published' WHERE id = %s", (draft_id,))
-        with conn.cursor() as cur:
-            attach_default_course(cur, [published_id])
+        row = publish_draft_row(conn, draft_id)
         conn.commit()
-        return conn.execute("SELECT * FROM knowledge_published WHERE id = %s", (published_id,)).fetchone()
+        return row
 
 
 @app.get("/api/library")
@@ -576,6 +653,7 @@ def library(
     elif resource_filter:
         where_sql += " AND k.source_resource_id = %s"
         args.append(resource_filter)
+    where_sql += pending_draft_exclusion("k")
     safe_limit, safe_offset = page_args(limit, offset)
     with connect() as conn:
         total = conn.execute("SELECT COUNT(*) AS n" + where_sql, args).fetchone()["n"]
@@ -771,11 +849,12 @@ def _course_filters(course):
 
 def _matching_published_count(conn, course):
     kinds, levels, grades = _course_filters(course)
-    sql = "SELECT COUNT(*) AS n FROM knowledge_published WHERE kind = ANY(%s) AND level = ANY(%s)"
+    sql = "SELECT COUNT(*) AS n FROM knowledge_published k WHERE kind = ANY(%s) AND level = ANY(%s)"
     args = [kinds, levels]
     if grades:
         sql += " AND grade = ANY(%s)"
         args.append(grades)
+    sql += pending_draft_exclusion("k")
     return conn.execute(sql, args).fetchone()["n"]
 
 
@@ -821,13 +900,14 @@ def _ensure_default_synced(conn, course):
 def _candidate_points(conn, kinds, levels, grades):
     sql = """
         SELECT id, kind, level, grade, prompt, answer, tags, source, point_key, group_key
-        FROM knowledge_published
+        FROM knowledge_published k
         WHERE kind = ANY(%s) AND level = ANY(%s)
         """
     args = [kinds, levels]
     if grades:
         sql += " AND grade = ANY(%s)"
         args.append(grades)
+    sql += pending_draft_exclusion("k")
     sql += " ORDER BY grade, kind, level, id"
     return conn.execute(sql, args).fetchall()
 

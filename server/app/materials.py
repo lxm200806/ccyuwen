@@ -116,6 +116,18 @@ PACKS = (
     },
 )
 
+GRADE_PACKS = PACKS
+IDIOM_PACK = {
+    "slug": "elementary-idioms",
+    "title": "小学成语",
+    "json_name": "小学成语.json",
+    "md_name": "小学成语.md",
+    "source_json": "idioms/小学成语.json",
+    "bundled": "",
+    "points": (),
+}
+PACKS = GRADE_PACKS + (IDIOM_PACK,)
+
 _DEFAULT = next(item for item in PACKS if item["slug"] == "grade3-shang")
 SLUG = _DEFAULT["slug"]
 TITLE = _DEFAULT["title"]
@@ -149,6 +161,21 @@ def find_pack(slug):
         if pack["slug"] == text:
             return pack
     return None
+
+
+def is_grade_pack(pack=None):
+    spec = pack if isinstance(pack, dict) else find_pack(pack)
+    return bool(spec) and str(spec.get("slug") or "").startswith("grade")
+
+
+def pack_json_path(pack=None):
+    spec = pack or _DEFAULT
+    extra = spec.get("source_json")
+    if extra:
+        fallback = raw_root() / extra
+        if fallback.is_file():
+            return fallback
+    return raw_root() / spec["json_name"]
 
 
 def bundled_md(pack=None):
@@ -236,7 +263,7 @@ def read_pack_file(path, pack=None):
 
 def load_pack(pack=None):
     spec = pack or _DEFAULT
-    json_path = raw_root() / spec["json_name"]
+    json_path = pack_json_path(spec)
     original = read_original(spec)
     stored_version = 1
     stored_hash = ""
@@ -247,6 +274,8 @@ def load_pack(pack=None):
             stored_hash = str(loaded.get("contentHash") or "") or pack_fingerprint(loaded)
             if original:
                 loaded["original"] = original
+            loaded["title"] = spec["title"]
+            loaded["slug"] = spec["slug"]
             loaded["contentHash"] = pack_fingerprint(loaded)
             loaded["version"] = next_version(stored_version, stored_hash, loaded["contentHash"])
             return loaded
@@ -288,11 +317,12 @@ def write_official_files(pack, spec=None):
     raw_dir = raw_root()
     try:
         raw_dir.mkdir(parents=True, exist_ok=True)
-        (raw_dir / spec["json_name"]).write_text(dump_pack(pack), encoding="utf-8")
+        if not spec.get("source_json"):
+            (raw_dir / spec["json_name"]).write_text(dump_pack(pack), encoding="utf-8")
         if pack.get("original") and not (raw_dir / spec["md_name"]).is_file():
             (raw_dir / spec["md_name"]).write_text(pack["original"], encoding="utf-8")
         bundled = bundled_md(spec)
-        if pack.get("original") and not bundled.is_file():
+        if spec.get("bundled") and pack.get("original") and not bundled.is_file():
             bundled.parent.mkdir(parents=True, exist_ok=True)
             bundled.write_text(pack["original"], encoding="utf-8")
     except OSError:
@@ -371,6 +401,20 @@ def upsert_published(cur, point, resource_id=None, force=False):
             (point["prompt"], point["answer"]),
         )
         existing = cur.fetchone()
+        other_key = str((existing or {}).get("point_key") or "").strip()
+        if existing and key and other_key and other_key != key:
+            existing = None
+    if not existing and point.get("kind") == "idiom" and key:
+        cur.execute(
+            """
+            SELECT * FROM knowledge_published
+            WHERE kind = 'idiom' AND answer = %s AND point_key <> '' AND point_key <> %s
+            """,
+            (point["answer"], key),
+        )
+        other = cur.fetchone()
+        if other:
+            return other["id"], "unchanged"
     fields = (
         point["kind"],
         point["level"],
@@ -408,6 +452,33 @@ def upsert_published(cur, point, resource_id=None, force=False):
         fields,
     )
     return cur.fetchone()["id"], "inserted"
+
+
+def discard_matching_drafts(cur, points):
+    for point in points or []:
+        key = str(point.get("key") or "").strip()
+        if key:
+            cur.execute(
+                "UPDATE knowledge_draft SET status = 'discarded' WHERE status = 'draft' AND point_key = %s",
+                (key,),
+            )
+        cur.execute(
+            """
+            UPDATE knowledge_draft
+            SET status = 'discarded'
+            WHERE status = 'draft' AND prompt = %s AND answer = %s
+            """,
+            (point.get("prompt") or "", point.get("answer") or ""),
+        )
+        if point.get("kind") == "idiom" and point.get("answer"):
+            cur.execute(
+                """
+                UPDATE knowledge_draft
+                SET status = 'discarded'
+                WHERE status = 'draft' AND kind = 'idiom' AND answer = %s
+                """,
+                (point["answer"],),
+            )
 
 
 def attach_default_course(cur, point_ids):
@@ -452,6 +523,7 @@ def sync_pack(cur, spec, force=True):
         else:
             unchanged += 1
     attach_default_course(cur, ids)
+    discard_matching_drafts(cur, pack["points"])
     mark_synced(cur, json_id, pack.get("version") or 1, pack.get("contentHash") or "")
     return {
         "resourceId": json_id,

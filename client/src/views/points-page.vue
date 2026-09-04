@@ -44,7 +44,8 @@
 		<p class="muted">
 			<template v-if="loading">正在加载知识点…</template>
 			<template v-else>
-				共 {{ total }} 条，已显示 {{ points.length }} 条
+				共 {{ total }} 条
+				<template v-if="total">，第 {{ page }} / {{ pageCount }} 页，本页 {{ points.length }} 条</template>
 				<template v-if="byGroup"> · {{ groupedPoints.length }} 组</template>
 			</template>
 		</p>
@@ -115,7 +116,7 @@
 				<button v-if="isAdmin" class="ghost" type="button" @click="startEdit(item)">编辑</button>
 			</article>
 		</template>
-		<button v-if="points.length < total" class="ghost" type="button" @click="loadMore">加载更多</button>
+		<Pager :page="page" :page-count="pageCount" @update:page="goPage" />
 	</section>
 </template>
 
@@ -123,6 +124,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { getUser, request } from '../api.js'
 import { GRADE_OPTIONS, KIND_OPTIONS, LEVEL_OPTIONS, kindLabel } from '../catalog.js'
+import Pager from '../pager.vue'
 
 const isAdmin = (getUser() || {}).role === 'admin'
 const intro = isAdmin
@@ -145,6 +147,9 @@ const officialPacks = computed(() => {
 })
 const points = ref([])
 const total = ref(0)
+const page = ref(1)
+const PAGE_SIZE = 50
+const pageCount = computed(() => Math.max(1, Math.ceil((Number(total.value) || 0) / PAGE_SIZE)))
 const editing = ref(null)
 const error = ref('')
 const message = ref('')
@@ -199,12 +204,8 @@ function groupEnergy(group) {
 	}, 0)
 }
 
-function pageSize() {
-	return byGroup.value ? 500 : 100
-}
-
 function libraryQuery(offset) {
-	const query = ['limit=' + pageSize(), 'offset=' + offset]
+	const query = ['limit=' + PAGE_SIZE, 'offset=' + offset]
 	if (kind.value) {
 		query.push('kind=' + encodeURIComponent(kind.value))
 	}
@@ -239,12 +240,21 @@ async function loadPoints() {
 	error.value = ''
 	loading.value = true
 	try {
-		const data = await request('/library' + libraryQuery(0))
+		let data = await request('/library' + libraryQuery((page.value - 1) * PAGE_SIZE))
 		if (ticket !== loadTicket) {
 			return
 		}
-		points.value = data.items || []
 		total.value = Number(data.total) || 0
+		const pages = Math.max(1, Math.ceil(total.value / PAGE_SIZE))
+		if (page.value > pages) {
+			page.value = pages
+			data = await request('/library' + libraryQuery((page.value - 1) * PAGE_SIZE))
+			if (ticket !== loadTicket) {
+				return
+			}
+			total.value = Number(data.total) || 0
+		}
+		points.value = data.items || []
 	} catch (err) {
 		if (ticket !== loadTicket) {
 			return
@@ -259,15 +269,9 @@ async function loadPoints() {
 	}
 }
 
-async function loadMore() {
-	error.value = ''
-	try {
-		const data = await request('/library' + libraryQuery(points.value.length))
-		points.value = points.value.concat(data.items || [])
-		total.value = Number(data.total) || total.value
-	} catch (err) {
-		error.value = err.message
-	}
+function goPage(next) {
+	page.value = next
+	loadPoints()
 }
 
 function startEdit(item) {
@@ -308,7 +312,10 @@ async function savePoint() {
 	}
 }
 
-watch([kind, level, grade, resourceId, byGroup], loadPoints)
+watch([kind, level, grade, resourceId, byGroup], () => {
+	page.value = 1
+	loadPoints()
+})
 
 async function loadResources() {
 	try {

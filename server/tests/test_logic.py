@@ -130,7 +130,17 @@ class Grade3aTests(unittest.TestCase):
         self.assertEqual(next(item["kind"] for item in GRADE3A_POINTS if item["key"] == "g3s-poem-simaguang"), "wenyan")
 
     def test_original_and_pack(self):
-        from app.materials import PACKS, bundled_md, dump_pack, find_pack, load_pack, read_original
+        from app.materials import (
+            GRADE_PACKS,
+            IDIOM_PACK,
+            PACKS,
+            bundled_md,
+            dump_pack,
+            find_pack,
+            is_grade_pack,
+            load_pack,
+            read_original,
+        )
 
         spec = find_pack("grade3-shang")
         original = read_original(spec) or bundled_md(spec).read_text(encoding="utf-8")
@@ -144,8 +154,26 @@ class Grade3aTests(unittest.TestCase):
         self.assertEqual(parsed["ok"][0]["key"], pack["points"][0]["key"])
 
         keys = []
-        self.assertEqual(len(PACKS), 12)
-        for spec in PACKS:
+        self.assertEqual(len(GRADE_PACKS), 12)
+        self.assertEqual(len(PACKS), 13)
+        self.assertEqual(IDIOM_PACK["title"], "小学成语")
+        self.assertTrue(is_grade_pack("grade3-shang"))
+        self.assertFalse(is_grade_pack("elementary-idioms"))
+        idioms = load_pack(find_pack("elementary-idioms"))
+        self.assertGreaterEqual(len(idioms["points"]), 1900, "elementary-idioms")
+        self.assertTrue(any(point["kind"] == "idiom" for point in idioms["points"]))
+        by_answer = {point["answer"]: point for point in idioms["points"]}
+        self.assertEqual(by_answer["山清水秀"]["grade"], "一年级上")
+        self.assertIn("课文", by_answer["山清水秀"]["source"])
+        self.assertEqual(by_answer["春回大地"]["grade"], "一年级下")
+        self.assertIn("日积月累", by_answer["春回大地"]["source"])
+        self.assertEqual(by_answer["狐假虎威"]["grade"], "二年级上")
+        self.assertEqual(by_answer["自言自语"]["grade"], "一年级上")
+        self.assertIn("二年级下册", by_answer["自言自语"]["source"])
+        self.assertGreaterEqual(sum(1 for point in idioms["points"] if point.get("grade")), 240)
+        self.assertIn("日积月累", idioms["original"])
+        self.assertIn("课文成语", idioms["original"])
+        for spec in GRADE_PACKS:
             loaded = load_pack(spec)
             self.assertIn("日积月累", loaded["original"], spec["slug"])
             self.assertGreater(len(loaded["points"]), 15, spec["slug"])
@@ -153,17 +181,40 @@ class Grade3aTests(unittest.TestCase):
             for point in loaded["points"]:
                 error = validate_card(point["kind"], point["prompt"], point["answer"])
                 self.assertIsNone(error, point["key"] + " " + str(error))
+        keys.extend(point["key"] for point in idioms["points"])
         self.assertEqual(len(keys), len(set(keys)))
+
+    def test_textbook_idioms_are_graded(self):
+        import json
+        from pathlib import Path
+
+        from app.materials import find_pack, load_pack, raw_root
+
+        data = json.loads((raw_root() / "idioms" / "textbook_by_grade.json").read_text(encoding="utf-8"))
+        expected = []
+        for block in data.get("blocks") or []:
+            expected.extend(block.get("words") or [])
+        self.assertGreaterEqual(len(set(expected)), 240)
+
+        idioms = load_pack(find_pack("elementary-idioms"))
+        by_answer = {point["answer"]: point for point in idioms["points"]}
+        missing = [word for word in expected if word not in by_answer]
+        self.assertEqual(missing, [], "missing textbook idioms")
+        self.assertEqual(by_answer["不可思议"]["grade"], "六年级下")
+        self.assertEqual(by_answer["安居乐业"]["grade"], "二年级上")
+        printable = Path(raw_root() / "小学成语.md").read_text(encoding="utf-8")
+        self.assertIn("山清水秀、自言自语", printable)
+        self.assertIn("无成语", printable)
 
     def test_original_lists_are_in_points(self):
         import re
 
         from app.grade import normalize
-        from app.materials import PACKS, read_original
+        from app.materials import GRADE_PACKS, read_original
 
         word_re = re.compile(r"^[\u4e00-\u9fff]{2,4}$")
         missing = []
-        for spec in PACKS:
+        for spec in GRADE_PACKS:
             original = read_original(spec)
             answers = normalize("".join(point["answer"] for point in spec["points"]))
             searchable = normalize("".join(point["answer"] + point["prompt"] for point in spec["points"]))
