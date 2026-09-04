@@ -80,14 +80,17 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(response.json()["demoHints"])
 
     def test_draft_publish_autosyncs_default_not_custom(self):
-        prompt = "看拼音写字：chāo（默认课" + self.marker + "）"
+        first_prompt = "看拼音写字：chāo（默认课" + self.marker + "）"
         imported = self.client.post(
             "/api/drafts/import",
-            json={"text": "kind,level,grade,prompt,answer,tags,source\n" + csv_row("zi", "L4", prompt, "超")},
+            json={"text": "kind,level,grade,prompt,answer,tags,source\n" + csv_row("zi", "L4", first_prompt, "超")},
             headers=self.admin,
         )
         self.assertEqual(imported.status_code, 200, imported.text)
-        draft_id = imported.json()["items"][0]["id"]
+        first_id = imported.json()["items"][0]["id"]
+        first = self.client.post("/api/drafts/" + str(first_id) + "/publish", headers=self.admin)
+        self.assertEqual(first.status_code, 200, first.text)
+        first_point = first.json()["id"]
 
         custom = self.client.post(
             "/api/courses",
@@ -103,10 +106,19 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(custom.status_code, 200, custom.text)
         custom_id = custom.json()["id"]
         before_count = custom.json()["itemCount"]
+        self.assertGreaterEqual(before_count, 1)
 
-        published = self.client.post("/api/drafts/" + str(draft_id) + "/publish", headers=self.admin)
+        extra_prompt = "看拼音写字：yuè（待同步" + self.marker + "）"
+        extra = self.client.post(
+            "/api/drafts/import",
+            json={"text": "kind,level,grade,prompt,answer,tags,source\n" + csv_row("zi", "L4", extra_prompt, "月")},
+            headers=self.admin,
+        )
+        extra_draft = extra.json()["items"][0]["id"]
+        published = self.client.post("/api/drafts/" + str(extra_draft) + "/publish", headers=self.admin)
         self.assertEqual(published.status_code, 200, published.text)
         point_id = published.json()["id"]
+        self.assertNotEqual(point_id, first_point)
 
         courses = self.client.get("/api/courses", headers=self.kid)
         self.assertEqual(courses.status_code, 200, courses.text)
