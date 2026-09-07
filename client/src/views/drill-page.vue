@@ -21,7 +21,9 @@
 				<p class="today-title">{{ statusTitle }}</p>
 				<p class="hint">{{ statusHint }}</p>
 				<p v-if="cheerText" class="cheer">{{ cheerText }}</p>
+				<p v-if="wrongBook" class="cheer">这次只练最近容易错的题，用测试方式再写一遍。</p>
 			</div>
+			<p v-if="showTimeCap" class="banner" role="status">今天先到这儿。写完这一题就可以收工了。</p>
 			<p class="hint">{{ modeHint }}</p>
 			<label class="pref-toggle">
 				<input
@@ -45,28 +47,36 @@
 				<p class="muted">{{ questionTypeLabel(questionType) }}<template v-if="card.lemma && !isJudgeWidget"> · {{ card.lemma }}</template></p>
 				<h2>{{ card.prompt }}</h2>
 				<template v-if="isReciteWidget && !result">
-					<button class="danger" type="button" :disabled="busy" @click="speak">听写朗读</button>
+					<div class="recite-controls">
+						<button class="danger recite-speak" type="button" :disabled="busy || !canSpeak" @click="speak">
+							{{ speaking ? '停止朗读' : '听写朗读' }}
+						</button>
+						<button
+							class="ghost recite-reveal"
+							type="button"
+							:disabled="busy || revealedCount >= reciteLines.length"
+							@click="revealNext"
+						>显示下一行</button>
+						<button
+							v-if="revealedCount < reciteLines.length"
+							class="ghost recite-reveal"
+							type="button"
+							:disabled="busy"
+							@click="revealAll"
+						>对照全文</button>
+					</div>
+					<p v-if="!canSpeak" class="hint">这台设备不能朗读。可以自己读，再逐行对照。</p>
 					<div class="recite-lines" aria-live="polite">
 						<p
 							v-for="(line, lineIndex) in reciteLines"
 							:key="lineIndex"
 							class="recite-line"
-							:class="{ covered: lineIndex >= revealedCount }"
+							:class="{
+								covered: lineIndex >= revealedCount,
+								current: lineIndex === currentLineIndex && lineIndex < revealedCount
+							}"
 						>{{ lineIndex >= revealedCount ? '（已遮住）' : line }}</p>
 					</div>
-					<button
-						class="ghost"
-						type="button"
-						:disabled="busy || revealedCount >= reciteLines.length"
-						@click="revealNext"
-					>显示下一行</button>
-					<button
-						v-if="revealedCount < reciteLines.length"
-						class="ghost"
-						type="button"
-						:disabled="busy"
-						@click="revealAll"
-					>对照全文</button>
 					<button type="button" :disabled="busy" @click="nextCard">下一题</button>
 					<details class="recite-optional">
 						<summary>也可以默写核对（可选，不记间隔）</summary>
@@ -136,8 +146,8 @@
 				</p>
 			</div>
 			<div v-else class="done-panel" :class="progress.status">
-				<p class="today-title">{{ emptyTitle }}</p>
-				<p class="hint">{{ emptyHint }}</p>
+				<p class="today-title">{{ stoppedForTime ? '今天先到这儿' : emptyTitle }}</p>
+				<p class="hint">{{ stoppedForTime ? '今天练的时间够了。剩下的明天再来。' : emptyHint }}</p>
 				<p v-if="cheerText" class="cheer">{{ cheerText }}</p>
 				<p class="hint">
 					明天再来，或打开
@@ -157,7 +167,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { request } from '../api.js'
 import { kindLabel, levelLabel, questionTypeLabel } from '../catalog.js'
@@ -187,6 +197,12 @@ const sessionStreak = ref(0)
 const sessionDoneCount = ref(0)
 const sessionAttempts = ref(0)
 const revealedCount = ref(0)
+const wrongBook = ref(false)
+const speaking = ref(false)
+const spokenLine = ref(-1)
+const stoppedForTime = ref(false)
+const canSpeak = ref(typeof window !== 'undefined' && !!window.speechSynthesis)
+let studyTimer = 0
 
 const card = computed(() => queue.value[index.value] || null)
 const questionType = computed(() => (card.value && (card.value.questionType || card.value.question_type)) || 'dictation')
@@ -215,6 +231,15 @@ const reciteLines = computed(() => {
 	}
 	const text = String(card.value.answer || '').trim()
 	return text ? [text] : ['（暂无原文）']
+})
+const currentLineIndex = computed(() => {
+	if (spokenLine.value >= 0) {
+		return spokenLine.value
+	}
+	return Math.max(0, revealedCount.value - 1)
+})
+const showTimeCap = computed(() => {
+	return !!progress.value.timeCapReached && !!card.value && !stoppedForTime.value
 })
 const modeLocked = computed(() => {
 	return busy.value || !!result.value || !!String(answer.value || '').trim() || revealedCount.value > 0
@@ -330,7 +355,14 @@ async function loadToday(nextMode) {
 	error.value = ''
 	try {
 		const requested = nextMode || route.query.mode || ''
-		const suffix = requested ? ('?mode=' + encodeURIComponent(requested)) : ''
+		const params = new URLSearchParams()
+		if (requested) {
+			params.set('mode', requested)
+		}
+		if (route.query.wrongBook) {
+			params.set('wrongBook', '1')
+		}
+		const suffix = params.toString() ? ('?' + params.toString()) : ''
 		const data = await request('/courses/' + route.params.id + '/today' + suffix)
 		queue.value = data.items
 		index.value = 0
@@ -344,11 +376,17 @@ async function loadToday(nextMode) {
 		mode.value = data.mode || 'learn'
 		reviewDefaultTest.value = !!data.reviewDefaultTest
 		progress.value = data.progress || {}
+		wrongBook.value = !!data.wrongBook
+		stoppedForTime.value = !!progress.value.timeCapReached && !(data.items || []).length
 		if (Array.isArray(data.modes) && data.modes.length) {
 			modeOptions.value = data.modes
 		}
-		if (route.query.mode !== mode.value) {
-			router.replace({ query: { mode: mode.value } })
+		const nextQuery = { mode: mode.value }
+		if (wrongBook.value) {
+			nextQuery.wrongBook = '1'
+		}
+		if (route.query.mode !== mode.value || !!route.query.wrongBook !== wrongBook.value) {
+			router.replace({ query: nextQuery })
 		}
 	} catch (err) {
 		error.value = err.message
@@ -421,7 +459,24 @@ async function submit(reveal) {
 	}
 }
 
+function stopSpeak() {
+	if (typeof window !== 'undefined' && window.speechSynthesis) {
+		window.speechSynthesis.cancel()
+	}
+	speaking.value = false
+	spokenLine.value = -1
+}
+
 function nextCard() {
+	stopSpeak()
+	if (progress.value.timeCapReached) {
+		stoppedForTime.value = true
+		queue.value = []
+		result.value = null
+		answer.value = ''
+		revealedCount.value = 0
+		return
+	}
 	index.value += 1
 	result.value = null
 	answer.value = ''
@@ -443,22 +498,80 @@ function pickAnswer(value) {
 	submit(false)
 }
 
+function speakText(text, lineIndex) {
+	if (!window.speechSynthesis) {
+		return
+	}
+	const utter = new SpeechSynthesisUtterance(text)
+	utter.lang = 'zh-CN'
+	utter.rate = 0.85
+	utter.onstart = function () {
+		speaking.value = true
+		if (lineIndex != null) {
+			spokenLine.value = lineIndex
+		}
+	}
+	utter.onend = function () {
+		speaking.value = window.speechSynthesis.speaking
+	}
+	utter.onerror = function () {
+		speaking.value = false
+	}
+	window.speechSynthesis.speak(utter)
+}
+
 function speak() {
 	if (!card.value || !window.speechSynthesis) {
 		return
 	}
+	if (speaking.value) {
+		stopSpeak()
+		return
+	}
 	window.speechSynthesis.cancel()
+	if (isReciteWidget.value && reciteLines.value.length) {
+		const start = revealedCount.value > 0 ? 0 : 0
+		const lines = revealedCount.value > 0
+			? reciteLines.value.slice(0, revealedCount.value)
+			: reciteLines.value
+		lines.forEach(function (line, offset) {
+			speakText(line, start + offset)
+		})
+		if (revealedCount.value === 0) {
+			revealedCount.value = reciteLines.value.length
+		}
+		return
+	}
 	let text = card.value.prompt
 	if (isJudgeWidget.value) {
 		text = judgeDisplay.value || text
 	} else if (card.value.lemma) {
 		text = card.value.lemma
 	}
-	const utter = new SpeechSynthesisUtterance(text)
-	utter.lang = 'zh-CN'
-	utter.rate = 0.85
-	window.speechSynthesis.speak(utter)
+	speakText(text)
 }
 
-onMounted(loadToday)
+async function pingStudyTime() {
+	try {
+		const data = await request('/courses/' + route.params.id + '/study-time', {
+			method: 'POST',
+			body: JSON.stringify({ seconds: 30 })
+		})
+		progress.value = Object.assign({}, progress.value, data)
+	} catch (err) {
+		return
+	}
+}
+
+onMounted(async () => {
+	await loadToday()
+	studyTimer = window.setInterval(pingStudyTime, 30000)
+})
+
+onUnmounted(() => {
+	stopSpeak()
+	if (studyTimer) {
+		window.clearInterval(studyTimer)
+	}
+})
 </script>

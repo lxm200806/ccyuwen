@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from . import sm2
-from .auth import current_user, demo_hints_enabled, make_token, require_admin, verify_password
+from .auth import current_user, demo_hints_enabled, hash_password, make_token, require_admin, verify_password
 from .study_modes import (
     MODE_OPTIONS,
     answer_lines,
@@ -20,7 +20,27 @@ from .study_modes import (
     resolve_default_mode,
     review_outcome,
 )
-from .progress import build_progress, kid_feedback, mastery_counts, parent_copy
+from .progress import (
+    build_progress,
+    kid_feedback,
+    mastery_counts,
+    parent_copy,
+    time_cap_state,
+    week_brief,
+)
+from .family import (
+    acting_student_id,
+    ensure_parent_can_view,
+    generate_link_code,
+    is_parent,
+    is_student,
+    link_parent_to_student,
+    list_linked_students,
+    load_student,
+    parse_minutes_cap,
+    serialize_public_user,
+)
+from .wizard import list_wizard_grades, wizard_plan
 from .cards import (
     GRADES,
     KIND_LABEL,
@@ -29,7 +49,9 @@ from .cards import (
     decode_filters,
     encode_filters,
     fill_group_fields,
+    cluster_groups,
     flatten_today_groups,
+    make_session,
     normalize_grade,
     page_args,
     parse_energy_limit,
@@ -206,6 +228,9 @@ class CourseBody(BaseModel):
     newEnergy: int = 30
     reviewEnergy: int = 30
     reviewDefaultTest: bool = False
+    dailyMinutesCap: int = 0
+    studentId: int | None = None
+    wizard: bool = False
 
 
 class CoursePatch(BaseModel):
@@ -214,6 +239,22 @@ class CoursePatch(BaseModel):
     newEnergy: int | None = None
     reviewEnergy: int | None = None
     reviewDefaultTest: bool | None = None
+    dailyMinutesCap: int | None = None
+
+
+class RegisterBody(BaseModel):
+    name: str
+    password: str
+    role: str = "user"
+
+
+class FamilyLinkBody(BaseModel):
+    studentName: str
+    linkCode: str
+
+
+class StudyTimeBody(BaseModel):
+    seconds: int = 0
 
 
 class CoursePreviewBody(BaseModel):
@@ -255,6 +296,7 @@ def meta():
         "audiences": [{"id": key, "label": AUDIENCE_LABEL[key]} for key in AUDIENCES],
         "demoHints": demo_hints_enabled(),
         "studyModes": list(MODE_OPTIONS),
+        "wizard": list_wizard_grades(),
     }
 
 
@@ -282,18 +324,103 @@ def decorate_library_item(row, hide_answer=False):
     return data
 
 
+def _user_payload(conn, user_row):
+    data = {"id": user_row["id"], "name": user_row["name"], "role": user_row["role"]}
+    if is_student(user_row):
+        data["linkCode"] = user_row.get("link_code") or ""
+    if is_parent(user_row):
+        data["students"] = [
+            serialize_public_user(row) for row in list_linked_students(conn, user_row["id"])
+        ]
+    return data
+
+
 @app.post("/api/login")
 def login(body: LoginBody):
     with connect() as conn:
         user = conn.execute("SELECT * FROM users WHERE name = %s", (body.name.strip(),)).fetchone()
-    if not user or not verify_password(body.password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="账号或密码错误")
-    return {"token": make_token(user), "user": {"id": user["id"], "name": user["name"], "role": user["role"]}}
+        if not user or not verify_password(body.password, user["password_hash"]):
+            raise HTTPException(status_code=401, detail="账号或密码错误")
+        payload = _user_payload(conn, user)
+    return {"token": make_token(user), "user": payload}
+
+
+@app.post("/api/register")
+def register(body: RegisterBody):
+    name = body.name.strip()
+    password = body.password.strip()
+    role = (body.role or "user").strip()
+    if role not in ("user", "parent"):
+        raise HTTPException(status_code=400, detail="只能注册学生或家长账号")
+    if len(name) < 2 or len(name) > 32:
+        raise HTTPException(status_code=400, detail="账号请用 2 到 32 个字")
+    if len(password) < 4:
+        raise HTTPException(status_code=400, detail="密码至少 4 位")
+    with connect() as conn:
+        existing = conn.execute("SELECT id FROM users WHERE name = %s", (name,)).fetchone()
+        if existing:
+            raise HTTPException(status_code=400, detail="这个账号已经有人用了")
+        code = generate_link_code() if role == "user" else ""
+        row = conn.execute(
+            """
+            INSERT INTO users (name, password_hash, role, link_code)
+            VALUES (%s, %s, %s, %s)
+            RETURNING *
+            """,
+            (name, hash_password(password), role, code),
+        ).fetchone()
+        conn.commit()
+        payload = _user_payload(conn, row)
+    return {"token": make_token(row), "user": payload}
 
 
 @app.get("/api/me")
 def me(user=Depends(current_user)):
-    return user
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM users WHERE id = %s", (user["id"],)).fetchone()
+        if not row:
+            raise HTTPException(status_code=401, detail="登录已失效")
+        return _user_payload(conn, row)
+
+
+@app.get("/api/family")
+def family_home(user=Depends(current_user)):
+    if not is_parent(user):
+        raise HTTPException(status_code=403, detail="需要家长账号")
+    today = sm2.today_text()
+    with connect() as conn:
+        students = []
+        for student in list_linked_students(conn, user["id"]):
+            courses = _list_student_courses(conn, student["id"], today)
+            students.append(
+                {
+                    "id": student["id"],
+                    "name": student["name"],
+                    "courses": courses,
+                    "today": _student_today_rollups(courses),
+                    "week": _student_week_rollup(conn, student["id"], today),
+                }
+            )
+        conn.commit()
+    return {"students": students}
+
+
+@app.post("/api/family/link")
+def family_link(body: FamilyLinkBody, user=Depends(current_user)):
+    if not is_parent(user):
+        raise HTTPException(status_code=403, detail="需要家长账号")
+    with connect() as conn:
+        student = link_parent_to_student(conn, user["id"], body.studentName, body.linkCode)
+        conn.commit()
+        return serialize_public_user(student)
+
+
+@app.get("/api/wizard")
+def course_wizard(grade: str = "", user=Depends(current_user)):
+    if is_parent(user) or is_student(user) or user.get("role") == "admin":
+        plan = wizard_plan(grade) if grade else None
+        return {"grades": list_wizard_grades(), "plan": plan}
+    raise HTTPException(status_code=403, detail="没有权限")
 
 
 @app.post("/api/resources")
@@ -769,34 +896,41 @@ def patch_published(point_id: int, body: DraftPatch, user=Depends(require_admin)
 
 @app.post("/api/courses")
 def create_course(body: CourseBody, user=Depends(current_user)):
-    name = body.name.strip()
+    plan = wizard_plan(body.grades[0]) if body.wizard and body.grades else None
+    name = body.name.strip() or (plan["name"] if plan else "")
     if not name:
         raise HTTPException(status_code=400, detail="请填写课程名称")
-    kinds = [item for item in body.kinds if item in KINDS] or list(KINDS)
-    levels = [item for item in body.levels if item in LEVELS] or list(LEVELS)
+    kinds = [item for item in (plan["kinds"] if plan and not body.kinds else body.kinds) if item in KINDS] or list(KINDS)
+    levels = [item for item in (plan["levels"] if plan and not body.levels else body.levels) if item in LEVELS] or list(LEVELS)
     grades = [item for item in body.grades if item in GRADES]
-    new_energy = parse_energy_limit(body.newEnergy)
-    review_energy = parse_energy_limit(body.reviewEnergy)
+    if plan and not grades:
+        grades = [plan["grade"]]
+    new_energy = parse_energy_limit(plan["newEnergy"] if plan and body.wizard else body.newEnergy)
+    review_energy = parse_energy_limit(plan["reviewEnergy"] if plan and body.wizard else body.reviewEnergy)
+    minutes_cap = parse_minutes_cap(body.dailyMinutesCap, plan["minutes"] if plan else 0)
+    note = body.note.strip() or (plan["note"] if plan else "")
     with connect() as conn:
+        owner_id = _owner_id_for_write(conn, user, body.studentId)
         points = _candidate_points(conn, kinds, levels, grades)
         if not points:
             raise HTTPException(status_code=400, detail="没有符合条件的已发布知识点")
         course = conn.execute(
             """
-            INSERT INTO courses (user_id, name, note, kinds, levels, grades, new_energy, review_energy, review_default_test)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO courses (user_id, name, note, kinds, levels, grades, new_energy, review_energy, review_default_test, daily_minutes_cap)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
             """,
             (
-                user["id"],
+                owner_id,
                 name,
-                body.note.strip(),
+                note,
                 encode_filters(kinds, KINDS),
                 encode_filters(levels, LEVELS),
                 encode_filters(grades, GRADES),
                 new_energy,
                 review_energy,
                 bool(body.reviewDefaultTest),
+                minutes_cap,
             ),
         ).fetchone()
         for index, point in enumerate(points):
@@ -810,39 +944,12 @@ def create_course(body: CourseBody, user=Depends(current_user)):
 
 
 @app.get("/api/courses")
-def list_courses(user=Depends(current_user)):
+def list_courses(studentId: int | None = None, user=Depends(current_user)):
     today = sm2.today_text()
     with connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT c.*, COUNT(i.point_id) AS item_count
-            FROM courses c
-            LEFT JOIN course_items i ON i.course_id = c.id
-            WHERE c.user_id = %s
-            GROUP BY c.id
-            ORDER BY c.id DESC
-            """,
-            (user["id"],),
-        ).fetchall()
-        results = []
-        changed = False
-        for row in rows:
-            course = dict(row)
-            if _is_default_course(course):
-                added = _sync_course_items(conn, course)
-                if added:
-                    changed = True
-                    course["item_count"] = _course_item_count(conn, course["id"])
-            results.append(
-                serialize_course(
-                    course,
-                    course["item_count"],
-                    published_count=_matching_published_count(conn, course),
-                    progress=_course_today_progress(conn, course, user["id"], today),
-                )
-            )
-        if changed:
-            conn.commit()
+        owner_id = _owner_id_for_write(conn, user, studentId) if is_parent(user) else int(user["id"])
+        results = _list_student_courses(conn, owner_id, today)
+        conn.commit()
     return results
 
 
@@ -859,7 +966,7 @@ def preview_course(body: CoursePreviewBody, user=Depends(current_user)):
     return plan
 
 
-def serialize_course(row, item_count=None, plan=None, published_count=None, progress=None):
+def serialize_course(row, item_count=None, plan=None, published_count=None, progress=None, week=None):
     data = dict(row)
     data["kinds"] = decode_filters(row.get("kinds"), KINDS)
     data["levels"] = decode_filters(row.get("levels"), LEVELS)
@@ -867,6 +974,8 @@ def serialize_course(row, item_count=None, plan=None, published_count=None, prog
     data["newEnergy"] = int(row.get("new_energy") or 30)
     data["reviewEnergy"] = int(row.get("review_energy") or 30)
     data["reviewDefaultTest"] = bool(row.get("review_default_test"))
+    data["dailyMinutesCap"] = int(row.get("daily_minutes_cap") or 0)
+    data["studentId"] = int(row.get("user_id") or 0)
     data["isDefault"] = _is_default_course(row)
     count = item_count if item_count is not None else data.get("item_count")
     if count is not None:
@@ -879,6 +988,8 @@ def serialize_course(row, item_count=None, plan=None, published_count=None, prog
         data["plan"] = plan
     if progress is not None:
         data["progress"] = progress
+    if week is not None:
+        data["week"] = week
     return data
 
 
@@ -1043,6 +1154,218 @@ def _own_course(conn, course_id, user_id):
     return course
 
 
+def _accessible_course(conn, course_id, user, student_only=False):
+    """学生看自己的课；家长看已关联孩子的课。默写练习仍只允许学生。"""
+    course = conn.execute("SELECT * FROM courses WHERE id = %s", (course_id,)).fetchone()
+    if not course:
+        raise HTTPException(status_code=404, detail="课程不存在")
+    owner_id = int(course["user_id"])
+    if is_parent(user):
+        if student_only:
+            raise HTTPException(status_code=403, detail="请让孩子打开今日默写")
+        ensure_parent_can_view(conn, user, owner_id)
+        return course
+    if int(user["id"]) != owner_id:
+        raise HTTPException(status_code=404, detail="课程不存在")
+    return course
+
+
+def _owner_id_for_write(conn, user, student_id=None):
+    if is_parent(user):
+        owner_id = acting_student_id(user, student_id)
+        ensure_parent_can_view(conn, user, owner_id)
+        return owner_id
+    return int(user["id"])
+
+
+def _list_student_courses(conn, student_id, today):
+    rows = conn.execute(
+        """
+        SELECT c.*, COUNT(i.point_id) AS item_count
+        FROM courses c
+        LEFT JOIN course_items i ON i.course_id = c.id
+        WHERE c.user_id = %s
+        GROUP BY c.id
+        ORDER BY c.id DESC
+        """,
+        (student_id,),
+    ).fetchall()
+    results = []
+    for row in rows:
+        course = dict(row)
+        if _is_default_course(course):
+            added = _sync_course_items(conn, course)
+            if added:
+                course["item_count"] = _course_item_count(conn, course["id"])
+        progress = _course_today_progress(conn, course, student_id, today)
+        week = _course_week_brief(conn, course["id"], student_id, today)
+        progress = _attach_time_cap(conn, course, student_id, today, progress)
+        results.append(
+            serialize_course(
+                course,
+                course["item_count"],
+                published_count=_matching_published_count(conn, course),
+                progress=progress,
+                week=week,
+            )
+        )
+    return results
+
+
+def _student_today_rollups(courses):
+    remaining_new = 0
+    remaining_review = 0
+    practiced = 0
+    weak = []
+    summaries = []
+    for course in courses or []:
+        progress = course.get("progress") or {}
+        remaining_new += int(progress.get("remainingNewEnergy") or 0)
+        remaining_review += int(progress.get("remainingReviewEnergy") or 0)
+        practiced += int(progress.get("todayPracticed") or 0)
+        if progress.get("summary"):
+            summaries.append(progress["summary"])
+        for item in progress.get("weakKinds") or []:
+            weak.append(item)
+    weak_labels = []
+    seen = set()
+    for item in weak:
+        label = item.get("label") or item.get("kind")
+        if label and label not in seen:
+            seen.add(label)
+            weak_labels.append(label)
+    if not courses:
+        title = "还没有课程"
+        summary = "先用年级向导给孩子组一份课。"
+    elif practiced <= 0 and remaining_new == 0 and remaining_review == 0:
+        title = "今天还没开始练"
+        summary = summaries[0] if summaries else "今天还没开始练。"
+    elif remaining_new or remaining_review:
+        title = "还差" + ("、".join(
+            part
+            for part in (
+                ("新学 %s 能" % remaining_new) if remaining_new else "",
+                ("复习 %s 能" % remaining_review) if remaining_review else "",
+            )
+            if part
+        ))
+        summary = summaries[0] if summaries else title
+    else:
+        title = "今天练完了"
+        summary = summaries[0] if summaries else "今天练完了。"
+    return {
+        "title": title,
+        "summary": summary,
+        "remainingNewEnergy": remaining_new,
+        "remainingReviewEnergy": remaining_review,
+        "todayPracticed": practiced,
+        "weakKinds": [{"label": label} for label in weak_labels[:3]],
+    }
+
+
+def _student_week_rollup(conn, student_id, today):
+    logs = conn.execute(
+        """
+        SELECT l.correct, l.created_at, p.kind
+        FROM review_log l
+        JOIN knowledge_published p ON p.id = l.point_id
+        WHERE l.user_id = %s AND l.created_at >= (CURRENT_DATE - INTERVAL '6 days')
+        ORDER BY l.created_at
+        """,
+        (student_id,),
+    ).fetchall()
+    return week_brief(logs, today=date.fromisoformat(today) if isinstance(today, str) else today)
+
+
+def _course_week_brief(conn, course_id, user_id, today):
+    logs = conn.execute(
+        """
+        SELECT l.correct, l.created_at, p.kind
+        FROM review_log l
+        JOIN knowledge_published p ON p.id = l.point_id
+        WHERE l.user_id = %s AND l.course_id = %s
+          AND l.created_at >= (CURRENT_DATE - INTERVAL '6 days')
+        ORDER BY l.created_at
+        """,
+        (user_id, course_id),
+    ).fetchall()
+    return week_brief(logs, today=date.fromisoformat(today) if isinstance(today, str) else today)
+
+
+def _load_study_seconds(conn, course_id, user_id, today):
+    row = conn.execute(
+        "SELECT seconds FROM study_time WHERE user_id = %s AND course_id = %s AND day = %s",
+        (user_id, course_id, today),
+    ).fetchone()
+    return int((row or {}).get("seconds") or 0)
+
+
+def _attach_time_cap(conn, course, user_id, today, progress):
+    data = dict(progress or {})
+    data.update(time_cap_state(_load_study_seconds(conn, course["id"], user_id, today), course.get("daily_minutes_cap")))
+    return data
+
+
+def _wrong_book_rows(conn, course_id, user_id, limit=40):
+    return conn.execute(
+        """
+        SELECT p.id, p.kind, p.level, p.grade, p.prompt, p.tags, p.source,
+               COUNT(*) FILTER (WHERE NOT l.correct) AS error_count,
+               MAX(l.created_at) FILTER (WHERE NOT l.correct) AS last_wrong,
+               MAX(l.created_at) AS last_attempt
+        FROM review_log l
+        JOIN knowledge_published p ON p.id = l.point_id
+        JOIN course_items i ON i.course_id = %s AND i.point_id = p.id
+        WHERE l.user_id = %s AND l.course_id = %s
+          AND l.created_at >= (CURRENT_DATE - INTERVAL '21 days')
+        GROUP BY p.id, p.kind, p.level, p.grade, p.prompt, p.tags, p.source
+        HAVING COUNT(*) FILTER (WHERE NOT l.correct) > 0
+        ORDER BY last_wrong DESC NULLS LAST, error_count DESC, p.id
+        LIMIT %s
+        """,
+        (course_id, user_id, course_id, limit),
+    ).fetchall()
+
+
+def _plan_wrong_book(points):
+    groups = []
+    for group in cluster_groups(points):
+        session = make_session(group, group["rows"])
+        session["role"] = "review"
+        groups.append(session)
+    energy = sum(int(group.get("energy") or 0) for group in groups)
+    return {
+        "groups": groups,
+        "due": len(groups),
+        "failed": len(groups),
+        "fresh": 0,
+        "tasks": len(groups),
+        "cards": sum(len(group.get("rows") or []) for group in groups),
+        "newEnergy": 0,
+        "reviewEnergy": energy,
+        "newBudget": 0,
+        "reviewBudget": energy,
+    }
+
+
+def _wrong_book_items(rows):
+    items = []
+    for row in rows or []:
+        items.append(
+            {
+                "id": row["id"],
+                "kind": row["kind"],
+                "kindLabel": KIND_LABEL.get(row["kind"], row["kind"]),
+                "level": row.get("level") or "",
+                "grade": row.get("grade") or "",
+                "prompt": row["prompt"],
+                "errorCount": int(row.get("error_count") or 0),
+                "lastWrong": str(row["last_wrong"]) if row.get("last_wrong") else "",
+            }
+        )
+    return items
+
+
 def _course_item_count(conn, course_id):
     return conn.execute(
         "SELECT COUNT(*) AS n FROM course_items WHERE course_id = %s",
@@ -1130,10 +1453,11 @@ def patch_course(course_id: int, body: CoursePatch, user=Depends(current_user)):
     new_energy = parse_energy_limit(payload.pop("newEnergy"), None) if "newEnergy" in payload else None
     review_energy = parse_energy_limit(payload.pop("reviewEnergy"), None) if "reviewEnergy" in payload else None
     review_pref = payload.pop("reviewDefaultTest") if "reviewDefaultTest" in payload else None
-    if not payload and new_energy is None and review_energy is None and review_pref is None:
+    minutes_cap = parse_minutes_cap(payload.pop("dailyMinutesCap"), None) if "dailyMinutesCap" in payload else None
+    if not payload and new_energy is None and review_energy is None and review_pref is None and minutes_cap is None:
         raise HTTPException(status_code=400, detail="没有要修改的字段")
     with connect() as conn:
-        course = _own_course(conn, course_id, user["id"])
+        course = _accessible_course(conn, course_id, user)
         merged = dict(course)
         merged.update(payload)
         if new_energy is not None:
@@ -1142,10 +1466,13 @@ def patch_course(course_id: int, body: CoursePatch, user=Depends(current_user)):
             merged["review_energy"] = review_energy
         if review_pref is not None:
             merged["review_default_test"] = bool(review_pref)
+        if minutes_cap is not None:
+            merged["daily_minutes_cap"] = minutes_cap
         conn.execute(
             """
             UPDATE courses
-            SET name = %s, note = %s, new_energy = %s, review_energy = %s, review_default_test = %s
+            SET name = %s, note = %s, new_energy = %s, review_energy = %s, review_default_test = %s,
+                daily_minutes_cap = %s
             WHERE id = %s
             """,
             (
@@ -1154,30 +1481,42 @@ def patch_course(course_id: int, body: CoursePatch, user=Depends(current_user)):
                 merged.get("new_energy") or 30,
                 merged.get("review_energy") or 30,
                 bool(merged.get("review_default_test")),
+                int(merged.get("daily_minutes_cap") or 0),
                 course_id,
             ),
         )
         conn.commit()
         updated = conn.execute("SELECT * FROM courses WHERE id = %s", (course_id,)).fetchone()
+        owner_id = int(updated["user_id"])
+        today = sm2.today_text()
+        progress = _attach_time_cap(
+            conn,
+            updated,
+            owner_id,
+            today,
+            _course_today_progress(conn, updated, owner_id, today),
+        )
         return serialize_course(
             updated,
             _course_item_count(conn, course_id),
             published_count=_matching_published_count(conn, updated),
-            progress=_course_today_progress(conn, updated, user["id"], sm2.today_text()),
+            progress=progress,
+            week=_course_week_brief(conn, course_id, owner_id, today),
         )
 
 
 @app.delete("/api/courses/{course_id}")
 def delete_course(course_id: int, user=Depends(current_user)):
     with connect() as conn:
-        _own_course(conn, course_id, user["id"])
+        course = _accessible_course(conn, course_id, user)
+        owner_id = int(course["user_id"])
         conn.execute(
             "DELETE FROM review_log WHERE user_id = %s AND course_id = %s",
-            (user["id"], course_id),
+            (owner_id, course_id),
         )
         conn.execute(
             "DELETE FROM review_state WHERE user_id = %s AND course_id = %s",
-            (user["id"], course_id),
+            (owner_id, course_id),
         )
         conn.execute("DELETE FROM courses WHERE id = %s", (course_id,))
         conn.commit()
@@ -1187,7 +1526,7 @@ def delete_course(course_id: int, user=Depends(current_user)):
 @app.post("/api/courses/{course_id}/sync")
 def sync_course(course_id: int, user=Depends(current_user)):
     with connect() as conn:
-        course = _own_course(conn, course_id, user["id"])
+        course = _accessible_course(conn, course_id, user)
         kinds = decode_filters(course.get("kinds"), KINDS)
         levels = decode_filters(course.get("levels"), LEVELS)
         if not kinds or not levels:
@@ -1201,15 +1540,29 @@ def sync_course(course_id: int, user=Depends(current_user)):
 
 
 @app.get("/api/courses/{course_id}/today")
-def today_queue(course_id: int, mode: str | None = None, user=Depends(current_user)):
+def today_queue(course_id: int, mode: str | None = None, wrongBook: int = 0, user=Depends(current_user)):
+    if is_parent(user):
+        raise HTTPException(status_code=403, detail="请让孩子打开今日默写")
     today = sm2.today_text()
+    use_wrong = bool(wrongBook)
     with connect() as conn:
-        course = _own_course(conn, course_id, user["id"])
+        course = _accessible_course(conn, course_id, user, student_only=True)
+        owner_id = int(course["user_id"])
         _ensure_default_synced(conn, course)
-        points, logs, planned = _plan_course_today(conn, course, user["id"], today)
-    suggested = resolve_default_mode(planned, _course_review_pref(course))
-    active = normalize_mode(mode) if mode else suggested
-    progress = build_progress(planned, logs, item_count=len(points))
+        points, logs, planned = _plan_course_today(conn, course, owner_id, today)
+        progress = _attach_time_cap(
+            conn,
+            course,
+            owner_id,
+            today,
+            build_progress(planned, logs, item_count=len(points)),
+        )
+        if use_wrong:
+            wrong_ids = {row["id"] for row in _wrong_book_rows(conn, course_id, owner_id)}
+            selected = [row for row in points if row["id"] in wrong_ids]
+            planned = _plan_wrong_book(selected)
+    suggested = "test" if use_wrong else resolve_default_mode(planned, _course_review_pref(course))
+    active = "test" if use_wrong else (normalize_mode(mode) if mode else suggested)
     planned = apply_today_mode(planned, active)
     items = []
     hide_source = active == "test"
@@ -1260,16 +1613,18 @@ def today_queue(course_id: int, mode: str | None = None, user=Depends(current_us
         "mode": active,
         "defaultMode": suggested,
         "reviewDefaultTest": _course_review_pref(course),
-        "energyCharged": planned.get("energyCharged", True),
+        "energyCharged": False if use_wrong else planned.get("energyCharged", True),
         "modes": list(MODE_OPTIONS),
         "progress": progress,
+        "wrongBook": use_wrong,
+        "dailyMinutesCap": int(course.get("daily_minutes_cap") or 0),
     }
 
 
 @app.get("/api/courses/{course_id}/plan")
 def course_plan(course_id: int, user=Depends(current_user)):
     with connect() as conn:
-        course = _own_course(conn, course_id, user["id"])
+        course = _accessible_course(conn, course_id, user)
         _ensure_default_synced(conn, course)
         points = _course_plan_points(conn, course_id)
     plan = plan_course_days(points, course.get("new_energy") or 30, course.get("review_energy") or 30)
@@ -1279,10 +1634,13 @@ def course_plan(course_id: int, user=Depends(current_user)):
 
 @app.post("/api/courses/{course_id}/review")
 def review_point(course_id: int, body: ReviewBody, user=Depends(current_user)):
+    if is_parent(user):
+        raise HTTPException(status_code=403, detail="请让孩子打开今日默写")
     today = sm2.today_text()
     mode = normalize_mode(body.mode)
     with connect() as conn:
-        _own_course(conn, course_id, user["id"])
+        course = _accessible_course(conn, course_id, user, student_only=True)
+        _own_course(conn, course_id, course["user_id"])
         point = conn.execute(
             """
             SELECT p.*, s.n, s.ef, s.interval, s.due, s.lapses, s.last
@@ -1363,7 +1721,8 @@ def review_point(course_id: int, body: ReviewBody, user=Depends(current_user)):
 def course_stats(course_id: int, user=Depends(current_user)):
     today = sm2.today_text()
     with connect() as conn:
-        course = _own_course(conn, course_id, user["id"])
+        course = _accessible_course(conn, course_id, user)
+        owner_id = int(course["user_id"])
         _ensure_default_synced(conn, course)
         rows = conn.execute(
             """
@@ -1391,48 +1750,112 @@ def course_stats(course_id: int, user=Depends(current_user)):
                      s.n, s.interval, s.due, s.lapses, s.last, i.sort
             ORDER BY i.sort, p.id
             """,
-            (user["id"], user["id"], course_id, user["id"], course_id, course_id),
+            (owner_id, owner_id, course_id, owner_id, course_id, course_id),
         ).fetchall()
-        points, logs, planned = _plan_course_today(conn, course, user["id"], today)
-    items = []
-    for row in rows:
-        item = dict(row)
-        item["mastered"] = sm2.is_mastered(row)
-        item["passCount"] = int(item.get("pass_count") or 0)
-        items.append(item)
-    mastery = mastery_counts(items)
-    progress = build_progress(
-        planned,
-        logs,
-        item_count=len(points),
-        mastered=mastery["mastered"],
-        total=mastery["total"],
-    )
-    if not progress["weakKinds"]:
-        progress = dict(progress)
-        progress["weakKinds"] = mastery["weakKinds"]
-        progress["summary"] = parent_copy(
-            progress["status"],
-            progress["todayPracticed"],
-            progress["todayAccuracy"],
-            progress["weakKinds"],
-            progress["remainingNewEnergy"],
-            progress["remainingReviewEnergy"],
+        points, logs, planned = _plan_course_today(conn, course, owner_id, today)
+        week = _course_week_brief(conn, course_id, owner_id, today)
+        wrong_rows = _wrong_book_rows(conn, course_id, owner_id)
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["mastered"] = sm2.is_mastered(row)
+            item["passCount"] = int(item.get("pass_count") or 0)
+            items.append(item)
+        mastery = mastery_counts(items)
+        progress = build_progress(
+            planned,
+            logs,
+            item_count=len(points),
             mastered=mastery["mastered"],
             total=mastery["total"],
         )
+        if not progress["weakKinds"]:
+            progress = dict(progress)
+            progress["weakKinds"] = mastery["weakKinds"]
+            progress["summary"] = parent_copy(
+                progress["status"],
+                progress["todayPracticed"],
+                progress["todayAccuracy"],
+                progress["weakKinds"],
+                progress["remainingNewEnergy"],
+                progress["remainingReviewEnergy"],
+                mastered=mastery["mastered"],
+                total=mastery["total"],
+            )
+        progress = _attach_time_cap(conn, course, owner_id, today, progress)
     return {
         "items": items,
         "today": progress,
         "mastery": mastery,
+        "week": week,
+        "wrongBook": _wrong_book_items(wrong_rows),
         "summary": progress["summary"],
         "courseName": course.get("name") or "",
         "reviewDefaultTest": _course_review_pref(course),
+        "dailyMinutesCap": int(course.get("daily_minutes_cap") or 0),
+        "canDrill": is_student(user) and int(user["id"]) == owner_id,
     }
+
+
+@app.get("/api/courses/{course_id}/week")
+def course_week(course_id: int, user=Depends(current_user)):
+    today = sm2.today_text()
+    with connect() as conn:
+        course = _accessible_course(conn, course_id, user)
+        return _course_week_brief(conn, course_id, int(course["user_id"]), today)
+
+
+@app.get("/api/courses/{course_id}/wrong-book")
+def course_wrong_book(course_id: int, user=Depends(current_user)):
+    with connect() as conn:
+        course = _accessible_course(conn, course_id, user)
+        owner_id = int(course["user_id"])
+        items = _wrong_book_items(_wrong_book_rows(conn, course_id, owner_id))
+    return {
+        "items": items,
+        "courseName": course.get("name") or "",
+        "canDrill": is_student(user) and int(user["id"]) == owner_id,
+        "summary": (
+            "最近容易错的有 %s 题，适合再练一遍。" % len(items)
+            if items
+            else "最近没有记下的错题。先去今日默写，写错过的会收在这里。"
+        ),
+    }
+
+
+@app.post("/api/courses/{course_id}/study-time")
+def add_study_time(course_id: int, body: StudyTimeBody, user=Depends(current_user)):
+    if is_parent(user):
+        raise HTTPException(status_code=403, detail="请让孩子打开今日默写")
+    seconds = max(0, min(int(body.seconds or 0), 3600))
+    today = sm2.today_text()
+    with connect() as conn:
+        course = _accessible_course(conn, course_id, user, student_only=True)
+        if seconds:
+            conn.execute(
+                """
+                INSERT INTO study_time (user_id, course_id, day, seconds)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (user_id, course_id, day) DO UPDATE SET
+                    seconds = study_time.seconds + EXCLUDED.seconds
+                """,
+                (user["id"], course_id, today, seconds),
+            )
+            conn.commit()
+        progress = _attach_time_cap(
+            conn,
+            course,
+            user["id"],
+            today,
+            {"todayMinutes": 0},
+        )
+    return progress
 
 
 @app.get("/api/library/coverage")
 def library_coverage(user=Depends(current_user)):
+    if is_parent(user):
+        raise HTTPException(status_code=403, detail="覆盖页是给孩子看词库用的")
     with connect() as conn:
         total = conn.execute("SELECT COUNT(*) AS n FROM knowledge_published").fetchone()["n"]
         entry_count = conn.execute(

@@ -32,7 +32,9 @@
   省略 `mode` 时用上面的默认。响应带 `mode`、`defaultMode`、`energyCharged`、`modes`。背诵卡会带 `answer` / `lines` 供逐行对照。
 - `POST /api/courses/{id}/review` body 增加 `mode`。测试模式 `reveal: true` 返回 400。背诵不写 `review_state` / `review_log`。
 
+家长账号、近 7 日简报和错题再练见 [parent-account.md](parent-account.md)。背诵可用浏览器朗读，并逐行高亮对照。
+
 ## 后续
 
-- 背诵 TTS 音色与按句高亮
-- 独立家长账号 / 每周摘要推送
+- 背诵 TTS 音色与按句高亮的精细同步
+- 微信 / 邮件每周摘要推送

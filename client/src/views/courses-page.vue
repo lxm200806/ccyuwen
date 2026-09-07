@@ -1,8 +1,9 @@
 <template>
 	<section class="card">
 		<h2>我的课程</h2>
+		<p v-if="linkCode" class="hint">把家庭码告诉家长，就能绑定看进度：<code>{{ linkCode }}</code></p>
 		<p class="hint">
-			先打开一门课做「今日默写」。系统「默认课程」会在词库更新后自动补进新知识点；自己组的课请点「同步新词」，按原来的年级 / 类型筛选补进。也可以去「组课」再生成一份。
+			先打开一门课做「今日默写」。系统「默认课程」会在词库更新后自动补进新内容；自己组的课请点「同步新词」。也可以去「组课」再用年级向导生成一份。
 		</p>
 		<p v-if="loading" class="muted">正在加载课程…</p>
 		<p v-else-if="courses.length === 0 && !error" class="hint">
@@ -27,7 +28,7 @@
 			<template v-else>
 				<h3>{{ item.name }}</h3>
 				<p class="muted">
-					{{ item.note || '无备注' }} · {{ item.item_count }} 个知识点
+					{{ item.note || '无备注' }} · {{ item.item_count }} 题
 					<template v-if="item.kinds && item.kinds.length">
 						· {{ kindNames(item.kinds) }} · {{ item.levels.join(' / ') }}
 						<template v-if="item.grades && item.grades.length"> · {{ item.grades.join(' / ') }}</template>
@@ -40,7 +41,7 @@
 					<p v-if="item.progress && item.progress.summary" class="hint">{{ item.progress.summary }}</p>
 				</div>
 				<p v-if="item.pendingCount" class="banner">
-					词库有更新，本课还可补进 {{ item.pendingCount }} 条。点「同步新词」按原筛选加入。
+					词库有更新，本课还可补进 {{ item.pendingCount }} 题。点「同步新词」按原筛选加入。
 				</p>
 				<label class="pref-toggle">
 					<input
@@ -51,8 +52,21 @@
 					>
 					到期复习默认用测试模式
 				</label>
+				<label class="pref-toggle minutes-cap">
+					今日大约练
+					<input
+						v-model.number="item.dailyMinutesCap"
+						min="0"
+						max="180"
+						type="number"
+						:disabled="busy"
+						@change="saveMinutesCap(item)"
+					>
+					分钟（0 表示不限）
+				</label>
 				<div class="course-actions">
 					<router-link :to="'/courses/' + item.id + '/drill'">今日默写</router-link>
+					<router-link :to="'/courses/' + item.id + '/wrong-book'">错题再练</router-link>
 					<router-link :to="'/courses/' + item.id + '/plan'">学习计划</router-link>
 					<router-link :to="'/courses/' + item.id + '/stats'">掌握情况</router-link>
 					<button class="ghost" type="button" :disabled="busy" @click="startEdit(item)">改名</button>
@@ -74,7 +88,7 @@
 
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { request } from '../api.js'
+import { getUser, request } from '../api.js'
 import { KIND_LABEL } from '../catalog.js'
 
 function kindNames(ids) {
@@ -123,6 +137,7 @@ const staleCourses = computed(() => courses.value.filter(function (item) {
 const staleNames = computed(() => staleCourses.value.map(function (item) {
 	return item.name
 }).join('、'))
+const linkCode = ref((getUser() && getUser().linkCode) || '')
 
 async function loadCourses() {
 	courses.value = await request('/courses')
@@ -159,6 +174,27 @@ async function saveEdit(id) {
 	}
 }
 
+async function saveMinutesCap(item) {
+	error.value = ''
+	message.value = ''
+	busy.value = true
+	try {
+		const result = await request('/courses/' + item.id, {
+			method: 'PATCH',
+			body: JSON.stringify({ dailyMinutesCap: Number(item.dailyMinutesCap) || 0 })
+		})
+		item.dailyMinutesCap = result.dailyMinutesCap || 0
+		message.value = item.dailyMinutesCap
+			? item.name + '：今天大约练 ' + item.dailyMinutesCap + ' 分钟'
+			: item.name + '：已取消今日时长上限'
+	} catch (err) {
+		error.value = err.message
+		await loadCourses()
+	} finally {
+		busy.value = false
+	}
+}
+
 async function toggleReviewPref(item, checked) {
 	error.value = ''
 	message.value = ''
@@ -187,8 +223,8 @@ async function syncCourse(item) {
 	try {
 		const result = await request('/courses/' + item.id + '/sync', { method: 'POST' })
 		message.value = result.added
-			? item.name + ' 新补 ' + result.added + ' 条，现共 ' + result.item_count + ' 条'
-			: item.name + ' 没有新知识点'
+			? item.name + ' 新补 ' + result.added + ' 题，现共 ' + result.item_count + ' 题'
+			: item.name + ' 没有新题目'
 		await loadCourses()
 	} catch (err) {
 		error.value = err.message
@@ -218,6 +254,8 @@ async function removeCourse(item) {
 onMounted(async () => {
 	loading.value = true
 	try {
+		const me = await request('/me')
+		linkCode.value = me.linkCode || ''
 		await loadCourses()
 	} catch (err) {
 		error.value = err.message

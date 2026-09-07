@@ -16,7 +16,10 @@ from app.progress import (
     mastery_counts,
     parent_copy,
     progress_status,
+    time_cap_state,
+    week_brief,
 )
+from app.wizard import wizard_plan
 from app.cards import (
     decode_filters,
     encode_filters,
@@ -958,6 +961,36 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(counts["learning"], 1)
         self.assertEqual(counts["unseen"], 1)
         self.assertEqual(counts["weakKinds"][0]["label"], "词语")
+
+    def test_week_brief_and_time_cap(self):
+        from datetime import date
+
+        empty = week_brief([], today=date(2026, 9, 7))
+        self.assertEqual(empty["daysPracticed"], 0)
+        self.assertIn("还没练", empty["summary"])
+        logs = [
+            {"correct": True, "kind": "zi", "created_at": "2026-09-07T08:00:00"},
+            {"correct": False, "kind": "idiom", "created_at": "2026-09-06T08:00:00"},
+            {"correct": True, "kind": "idiom", "created_at": "2026-09-06T09:00:00"},
+            {"correct": True, "kind": "zi", "created_at": "2026-08-01T08:00:00"},
+        ]
+        brief = week_brief(logs, today=date(2026, 9, 7))
+        self.assertEqual(brief["daysPracticed"], 2)
+        self.assertEqual(brief["attempts"], 3)
+        self.assertEqual(brief["accuracy"], 67)
+        self.assertEqual(brief["weakKinds"][0]["label"], "词语")
+        self.assertIn("近 7 天练了 2 天", brief["summary"])
+        cap = time_cap_state(16 * 60, 15)
+        self.assertEqual(cap["todayMinutes"], 16)
+        self.assertTrue(cap["timeCapReached"])
+
+    def test_wizard_grade_plan(self):
+        plan = wizard_plan("三年级上")
+        self.assertEqual(plan["grade"], "三年级上")
+        self.assertIn("zi", plan["kinds"])
+        self.assertIn("L1", plan["levels"])
+        self.assertEqual(plan["minutes"], 15)
+        self.assertIsNone(wizard_plan("高中"))
 
 
 class DemoHintTests(unittest.TestCase):

@@ -42,6 +42,27 @@
 						到期复习默认用测试模式
 					</label>
 				</section>
+				<section v-if="week.summary" class="week-brief">
+					<h3>近 7 日</h3>
+					<p class="summary-sentence">{{ week.summary }}</p>
+					<div class="stats mastery-row">
+						<div class="stat"><b>{{ week.daysPracticed || 0 }}</b>练了几天</div>
+						<div class="stat"><b>{{ weekAccuracy }}</b>平均正确率</div>
+					</div>
+				</section>
+				<section v-if="wrongBook.length" class="wrong-brief">
+					<h3>错题再练</h3>
+					<p class="hint">最近容易错的有 {{ wrongBook.length }} 题。</p>
+					<ul class="wrong-list">
+						<li v-for="item in wrongBook.slice(0, 8)" :key="item.id">
+							<strong>{{ item.kindLabel }}</strong>
+							<span>{{ item.prompt }}</span>
+						</li>
+					</ul>
+					<div class="course-actions">
+						<router-link :to="'/courses/' + route.params.id + '/wrong-book'">{{ canDrill ? '一键再练' : '查看错题' }}</router-link>
+					</div>
+				</section>
 				<div class="stats mastery-row">
 					<div class="stat">
 						<b>{{ mastery.learning || 0 }}</b>
@@ -83,8 +104,10 @@
 			</template>
 		</template>
 		<div class="course-actions">
-			<router-link :to="'/courses/' + route.params.id + '/drill'">今日默写</router-link>
-			<router-link to="/courses">返回课程</router-link>
+			<router-link v-if="canDrill" :to="'/courses/' + route.params.id + '/drill'">今日默写</router-link>
+			<p v-else class="hint">默写请让孩子用自己的账号打开今日默写。</p>
+			<router-link :to="'/courses/' + route.params.id + '/wrong-book'">错题再练</router-link>
+			<router-link :to="backTo">返回</router-link>
 		</div>
 	</section>
 </template>
@@ -92,15 +115,18 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { request } from '../api.js'
+import { getUser, request } from '../api.js'
 
 const route = useRoute()
 const items = ref([])
 const today = ref({})
 const mastery = ref({})
+const week = ref({})
+const wrongBook = ref([])
 const summary = ref('')
 const courseName = ref('课程')
 const reviewDefaultTest = ref(false)
+const canDrill = ref(false)
 const error = ref('')
 const loading = ref(true)
 const prefBusy = ref(false)
@@ -130,6 +156,13 @@ const weakText = computed(() => {
 		return item.label || item.kind
 	}).join('、')
 })
+const weekAccuracy = computed(() => {
+	if (week.value.accuracy == null) {
+		return '—'
+	}
+	return week.value.accuracy + '%'
+})
+const backTo = computed(() => (getUser() && getUser().role === 'parent') ? '/family' : '/courses')
 
 async function loadStats() {
 	const data = await request('/courses/' + route.params.id + '/stats')
@@ -139,6 +172,9 @@ async function loadStats() {
 	summary.value = data.summary || (data.today && data.today.summary) || ''
 	courseName.value = data.courseName || '课程'
 	reviewDefaultTest.value = !!data.reviewDefaultTest
+	week.value = data.week || {}
+	wrongBook.value = data.wrongBook || []
+	canDrill.value = !!data.canDrill
 }
 
 async function toggleReviewPref(checked) {
