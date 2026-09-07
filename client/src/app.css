@@ -388,6 +388,71 @@ td {
 	user-select: none;
 }
 
+.recite-line.current {
+	border-color: var(--ink);
+	background: #fff3d6;
+	font-size: 20px;
+	line-height: 1.7;
+}
+
+.recite-controls {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 10px;
+	margin: 8px 0 12px;
+}
+
+.recite-speak,
+.recite-reveal {
+	min-height: 48px;
+	padding: 12px 18px;
+	font-size: 16px;
+}
+
+.family-student,
+.family-course,
+.wizard-plan,
+.week-brief,
+.wrong-brief,
+.link-form,
+.register-box {
+	margin-top: 14px;
+	padding-top: 12px;
+	border-top: 1px solid var(--line);
+}
+
+.family-course,
+.wizard-plan {
+	border-top: 0;
+	padding: 12px;
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	background: #fff;
+}
+
+.wrong-list {
+	padding-left: 18px;
+}
+
+.wrong-list li {
+	margin: 8px 0;
+	line-height: 1.5;
+}
+
+.wrong-list strong {
+	margin-right: 8px;
+}
+
+.minutes-cap input {
+	width: 72px;
+	margin: 0 6px;
+}
+
+.register-box summary,
+.link-form button {
+	margin-top: 8px;
+}
+
 .recite-optional {
 	margin-top: 14px;
 	color: var(--muted);

@@ -1,7 +1,39 @@
 <template>
 	<section class="card">
-		<h2>从已发布库生成课程</h2>
-		<p class="muted">按年级、类型、级别筛选。教材和小学成语里允许重复；组课时同一词条同一题型只收一张卡。若这个成语既属一年级又属二年级，两门课里都会出现，可以再学一遍。组课页不显示答案；要看答案请去「知识点」。</p>
+		<h2>年级向导组课</h2>
+		<p class="hint">先选年级，我们按大约 15 分钟语文给出类型和每天能量。家长会直接给已绑定的孩子组课。</p>
+		<label v-if="isParent" for="wizard-student">给哪个孩子</label>
+		<select v-if="isParent" id="wizard-student" v-model.number="studentId">
+			<option :value="0">请选择孩子</option>
+			<option v-for="item in students" :key="item.id" :value="item.id">{{ item.name }}</option>
+		</select>
+		<label for="wizard-grade">年级</label>
+		<select id="wizard-grade" v-model="wizardGrade">
+			<option value="">请选择年级</option>
+			<option v-for="item in gradeOptions" :key="item" :value="item">{{ item }}</option>
+		</select>
+		<div v-if="wizardPlan" class="wizard-plan">
+			<p class="summary-sentence">{{ wizardPlan.blurb }}</p>
+			<p class="muted">
+				建议练 {{ wizardPlan.kindLabels.join('、') }} · {{ wizardPlan.levels.join(' / ') }}
+				· 每天新学 {{ wizardPlan.newEnergy }} 能 / 复习 {{ wizardPlan.reviewEnergy }} 能
+				· 大约 {{ wizardPlan.minutes }} 分钟
+			</p>
+			<button type="button" :disabled="busy || (isParent && !studentId)" @click="createWizard">
+				{{ busy ? '正在生成…' : ('生成「' + wizardPlan.name + '」') }}
+			</button>
+		</div>
+		<p v-if="message" class="ok">{{ message }}</p>
+		<p v-if="error" class="error">{{ error }}</p>
+	</section>
+	<section class="card">
+		<h2>自己筛选组课</h2>
+		<p class="muted">按年级、类型、级别筛选。同一词条同一题型只收一张卡。组课页不显示答案。</p>
+		<label v-if="isParent" for="course-student">给哪个孩子</label>
+		<select v-if="isParent" id="course-student" v-model.number="studentId">
+			<option :value="0">请选择孩子</option>
+			<option v-for="item in students" :key="item.id" :value="item.id">{{ item.name }}</option>
+		</select>
 		<label for="course-name">课程名称</label>
 		<input id="course-name" v-model="name">
 		<label for="course-note">备注</label>
@@ -38,7 +70,7 @@
 			</label>
 		</div>
 		<p class="hint">
-			<strong>新学能量</strong>是每天新内容的上限，<strong>复习能量</strong>是每天复习到期内容的上限。一张<strong>学习卡</strong>是同一课文 / 模块的几条知识点，能量加总后按天安排。
+			<strong>新学能量</strong>是每天新内容的上限，<strong>复习能量</strong>是每天复习到期内容的上限。
 		</p>
 		<p class="muted">
 			<template v-if="loading">正在按当前筛选预览…</template>
@@ -50,12 +82,9 @@
 			</template>
 		</p>
 		<p v-if="!loading && total === 0" class="hint">
-			当前筛选没有已发布知识点。可放宽年级 / 类型 / 级别，或先去「知识点」确认词库，管理员也可在「原始资料」同步教材。
+			当前筛选没有合适的题目。可放宽年级 / 类型 / 级别，或先确认词库是否已同步。
 		</p>
-		<p class="muted">字 1 · 词语 2 · 成语 4 · 古诗 16/24/32 · 文言文 24/32/64/96。一张学习卡约 30 能量学一天，15 能量可配两张，50 以上拆成两天。</p>
-		<button type="button" :disabled="busy || loading || total === 0" @click="createCourse">{{ busy ? '正在生成…' : '生成课程' }}</button>
-		<p v-if="message" class="ok">{{ message }}</p>
-		<p v-if="error" class="error">{{ error }}</p>
+		<button type="button" :disabled="busy || loading || total === 0 || (isParent && !studentId)" @click="createCourse">{{ busy ? '正在生成…' : '生成课程' }}</button>
 		<ul>
 			<li v-for="point in points" :key="point.id">
 				{{ point.entryGrades || point.grade || '未分年级' }} · {{ kindLabel(point.kind) }} · {{ questionTypeLabel(point.questionType || point.question_type) }} · {{ point.level }} · {{ point.lemma || point.prompt }}
@@ -67,9 +96,17 @@
 
 <script setup>
 import { onMounted, ref, watch } from 'vue'
-import { request } from '../api.js'
+import { useRoute } from 'vue-router'
+import { getUser, request } from '../api.js'
 import { GRADE_OPTIONS, KIND_OPTIONS, LEVEL_OPTIONS, kindLabel, questionTypeLabel } from '../catalog.js'
 
+const route = useRoute()
+const user = getUser()
+const isParent = !!(user && user.role === 'parent')
+const students = ref((user && user.students) || [])
+const studentId = ref(Number(route.query.studentId) || 0)
+const wizardGrade = ref('三年级上')
+const wizardPlan = ref(null)
 const kindOptions = KIND_OPTIONS
 const levelOptions = LEVEL_OPTIONS
 const gradeOptions = GRADE_OPTIONS
@@ -131,9 +168,6 @@ async function loadLibrary() {
 				reviewEnergy: selectedReview
 			})
 		})
-		if (ticket !== loadTicket) {
-			return
-		}
 	} catch (err) {
 		if (ticket !== loadTicket) {
 			return
@@ -146,24 +180,36 @@ async function loadLibrary() {
 	}
 }
 
+function coursePayload(extra) {
+	const body = Object.assign({
+		name: name.value,
+		note: note.value,
+		kinds: kinds.value,
+		levels: levels.value,
+		grades: grades.value,
+		newEnergy: newEnergy.value,
+		reviewEnergy: reviewEnergy.value
+	}, extra || {})
+	if (isParent && studentId.value) {
+		body.studentId = studentId.value
+	}
+	return body
+}
+
 async function createCourse() {
 	error.value = ''
 	message.value = ''
+	if (isParent && !studentId.value) {
+		error.value = '请先选择孩子'
+		return
+	}
 	busy.value = true
 	try {
 		const course = await request('/courses', {
 			method: 'POST',
-			body: JSON.stringify({
-				name: name.value,
-				note: note.value,
-				kinds: kinds.value,
-				levels: levels.value,
-				grades: grades.value,
-				newEnergy: newEnergy.value,
-				reviewEnergy: reviewEnergy.value
-			})
+			body: JSON.stringify(coursePayload())
 		})
-		message.value = '已生成课程 #' + course.id + '，共 ' + course.itemCount + ' 条；新学约 ' + ((course.plan && course.plan.newDayCount) || 0) + ' 天，含复习共 ' + ((course.plan && course.plan.dayCount) || 0) + ' 天'
+		message.value = '已生成「' + course.name + '」，共 ' + course.itemCount + ' 题；新学约 ' + ((course.plan && course.plan.newDayCount) || 0) + ' 天，含复习共 ' + ((course.plan && course.plan.dayCount) || 0) + ' 天'
 	} catch (err) {
 		error.value = err.message
 	} finally {
@@ -171,6 +217,75 @@ async function createCourse() {
 	}
 }
 
+async function loadWizard() {
+	if (!wizardGrade.value) {
+		wizardPlan.value = null
+		return
+	}
+	const data = await request('/wizard?grade=' + encodeURIComponent(wizardGrade.value))
+	wizardPlan.value = data.plan
+	if (data.plan) {
+		name.value = data.plan.name
+		note.value = data.plan.note
+		kinds.value = data.plan.kinds.slice()
+		levels.value = data.plan.levels.slice()
+		grades.value = [data.plan.grade]
+		newEnergy.value = data.plan.newEnergy
+		reviewEnergy.value = data.plan.reviewEnergy
+	}
+}
+
+async function createWizard() {
+	error.value = ''
+	message.value = ''
+	if (isParent && !studentId.value) {
+		error.value = '请先选择孩子'
+		return
+	}
+	busy.value = true
+	try {
+		const course = await request('/courses', {
+			method: 'POST',
+			body: JSON.stringify(coursePayload({
+				wizard: true,
+				name: wizardPlan.value.name,
+				note: wizardPlan.value.note,
+				kinds: wizardPlan.value.kinds,
+				levels: wizardPlan.value.levels,
+				grades: [wizardPlan.value.grade],
+				newEnergy: wizardPlan.value.newEnergy,
+				reviewEnergy: wizardPlan.value.reviewEnergy,
+				dailyMinutesCap: wizardPlan.value.minutes
+			}))
+		})
+		message.value = '已生成「' + course.name + '」，大约每天 15 分钟。'
+	} catch (err) {
+		error.value = err.message
+	} finally {
+		busy.value = false
+	}
+}
+
+async function loadStudents() {
+	if (!isParent) {
+		return
+	}
+	const me = await request('/me')
+	students.value = me.students || []
+	if (!studentId.value && students.value.length === 1) {
+		studentId.value = students.value[0].id
+	}
+}
+
 watch([kinds, levels, grades, newEnergy, reviewEnergy], loadLibrary, { deep: true })
-onMounted(loadLibrary)
+watch(wizardGrade, loadWizard)
+onMounted(async () => {
+	try {
+		await loadStudents()
+		await loadWizard()
+		await loadLibrary()
+	} catch (err) {
+		error.value = err.message
+	}
+})
 </script>

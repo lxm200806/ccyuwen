@@ -1,4 +1,6 @@
-"""今日进度、家长摘要、孩子反馈文案。不改 SM-2。"""
+"""今日进度、家长摘要、近七日简报、孩子反馈文案。不改 SM-2。"""
+from datetime import date, timedelta
+
 from .cards import KIND_LABEL
 
 STATUS_EMPTY = "empty"
@@ -246,6 +248,89 @@ def build_progress(planned, logs, item_count=0, mastered=None, total=None):
         "reviewBudget": review_budget,
         "todayDone": status == STATUS_DONE or (energy_filled and log_stats["todayPracticed"] > 0),
         "energyFilled": energy_filled,
+    }
+
+
+def parse_log_day(row):
+    raw = row.get("created_at") or row.get("day")
+    if raw is None:
+        return None
+    if hasattr(raw, "date"):
+        return raw.date()
+    text = str(raw)
+    if "T" in text:
+        text = text.split("T", 1)[0]
+    if " " in text:
+        text = text.split(" ", 1)[0]
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
+def week_brief(logs, today=None):
+    """近 7 日：练了几天、平均正确率、容易错的类型、一句中文。"""
+    today = today or date.today()
+    start = today - timedelta(days=6)
+    rows = []
+    for row in logs or []:
+        day = parse_log_day(row)
+        if day is None or day < start or day > today:
+            continue
+        rows.append(dict(row, _day=day))
+    days = sorted({row["_day"] for row in rows})
+    attempts = len(rows)
+    correct = sum(1 for row in rows if row.get("correct"))
+    accuracy = accuracy_percent(attempts, correct)
+    kind_counts = {}
+    for row in rows:
+        kind = row.get("kind") or ""
+        if not kind:
+            continue
+        stats = kind_counts.setdefault(kind, {"attempts": 0, "errors": 0})
+        stats["attempts"] += 1
+        if not row.get("correct"):
+            stats["errors"] += 1
+    weak = weak_kind_rows(kind_counts)
+    weak_text = "、".join(item["label"] for item in weak[:3])
+    if attempts <= 0:
+        summary = "近 7 天还没练过。抽空让孩子打开今日默写就行。"
+    else:
+        summary = "近 7 天练了 %s 天，共 %s 条" % (len(days), attempts)
+        if accuracy is not None:
+            summary += "，平均正确率 %s%%" % accuracy
+        summary += "。"
+        if weak_text:
+            summary += "相对容易错的是" + weak_text + "。"
+        else:
+            summary += "这几天写得比较稳。"
+    return {
+        "daysPracticed": len(days),
+        "attempts": attempts,
+        "correct": correct,
+        "accuracy": accuracy,
+        "weakKinds": weak,
+        "summary": summary,
+        "from": start.isoformat(),
+        "to": today.isoformat(),
+    }
+
+
+def estimate_minutes(seconds):
+    seconds = max(0, int(seconds or 0))
+    if seconds <= 0:
+        return 0
+    return max(1, (seconds + 30) // 60)
+
+
+def time_cap_state(seconds, cap_minutes):
+    cap = int(cap_minutes or 0)
+    used = estimate_minutes(seconds)
+    reached = cap > 0 and used >= cap
+    return {
+        "todayMinutes": used,
+        "minutesCap": cap,
+        "timeCapReached": reached,
     }
 
 

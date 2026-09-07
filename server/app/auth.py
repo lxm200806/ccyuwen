@@ -8,6 +8,8 @@ import jwt
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from .family import is_admin, is_parent
+
 JWT_SECRET = os.environ.get("JWT_SECRET", "ccyuwen-dev")
 JWT_ALG = "HS256"
 bearer = HTTPBearer(auto_error=False)
@@ -56,6 +58,13 @@ def current_user(creds: HTTPAuthorizationCredentials = Depends(bearer)):
 
 
 def require_admin(user=Depends(current_user)):
-    if user["role"] != "admin":
+    if not is_admin(user):
         raise HTTPException(status_code=403, detail="需要管理员")
+    return user
+
+
+def reject_parent_admin(user=Depends(current_user)):
+    """家长不能进资源审核 / 原始资料一类接口。"""
+    if is_parent(user):
+        raise HTTPException(status_code=403, detail="家长不能管理词库")
     return user

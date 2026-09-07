@@ -871,6 +871,140 @@ class ApiTests(unittest.TestCase):
         self.assertNotEqual(ours1[0]["id"], ours2[0]["id"])
         self.assertIn("passCount", ours1[0])
 
+    def test_parent_seed_authz_wrong_book_week_and_wizard(self):
+        parent = self._login("parent", "parent123")
+        me = self.client.get("/api/me", headers=parent)
+        self.assertEqual(me.status_code, 200, me.text)
+        self.assertEqual(me.json()["role"], "parent")
+        self.assertTrue(me.json().get("students"))
+        kid_id = next(item["id"] for item in me.json()["students"] if item["name"] == "kid")
+
+        family = self.client.get("/api/family", headers=parent)
+        self.assertEqual(family.status_code, 200, family.text)
+        names = [item["name"] for item in family.json()["students"]]
+        self.assertIn("kid", names)
+        self.assertTrue(family.json()["students"][0].get("week"))
+        self.assertTrue(family.json()["students"][0].get("today"))
+
+        blocked = self.client.post(
+            "/api/drafts/import",
+            json={"text": "kind,level,grade,prompt,answer,tags,source\nzi,L4,三年级上,看拼音写字：jiā,家,测试,接口测试\n"},
+            headers=parent,
+        )
+        self.assertEqual(blocked.status_code, 403, blocked.text)
+        upload = self.client.post(
+            "/api/resources",
+            data={"scope": "user"},
+            files={"file": ("note.txt", b"hello", "text/plain")},
+            headers=parent,
+        )
+        self.assertEqual(upload.status_code, 403)
+
+        stranger = self.client.post(
+            "/api/register",
+            json={"name": "otherkid-" + self.marker, "password": "kid1234", "role": "user"},
+        )
+        self.assertEqual(stranger.status_code, 200, stranger.text)
+        other_headers = {"Authorization": "Bearer " + stranger.json()["token"]}
+        other_id = stranger.json()["user"]["id"]
+
+        prompt = "看拼音写字：cuò（家长" + self.marker + "）"
+        imported = self.client.post(
+            "/api/drafts/import",
+            json={"text": "kind,level,grade,prompt,answer,tags,source\n" + csv_row("zi", "L4", prompt, "错")},
+            headers=self.admin,
+        )
+        draft_id = imported.json()["items"][0]["id"]
+        published = self.client.post("/api/drafts/" + str(draft_id) + "/publish", headers=self.admin)
+        point_id = published.json()["id"]
+        course = self.client.post(
+            "/api/courses",
+            json={
+                "name": "接口课-家长-" + self.marker,
+                "note": "错题再练",
+                "kinds": ["zi"],
+                "levels": ["L4"],
+                "grades": ["三年级上"],
+            },
+            headers=self.kid,
+        )
+        self.assertEqual(course.status_code, 200, course.text)
+        course_id = course.json()["id"]
+        other_course = self.client.post(
+            "/api/courses",
+            json={"name": "接口课-他人-" + self.marker, "note": "", "kinds": ["zi"], "levels": ["L4"], "grades": ["三年级上"]},
+            headers=other_headers,
+        )
+        self.assertEqual(other_course.status_code, 200, other_course.text)
+        hidden = self.client.get("/api/courses/" + str(other_course.json()["id"]) + "/stats", headers=parent)
+        self.assertEqual(hidden.status_code, 403, hidden.text)
+        listed = self.client.get("/api/courses?studentId=" + str(other_id), headers=parent)
+        self.assertEqual(listed.status_code, 403, listed.text)
+        wrong = self.client.post(
+            "/api/courses/" + str(course_id) + "/review",
+            json={"pointId": point_id, "answer": "措", "mode": "test"},
+            headers=self.kid,
+        )
+        self.assertEqual(wrong.status_code, 200, wrong.text)
+        self.assertFalse(wrong.json()["correct"])
+
+        parent_review = self.client.post(
+            "/api/courses/" + str(course_id) + "/review",
+            json={"pointId": point_id, "answer": "错", "mode": "test"},
+            headers=parent,
+        )
+        self.assertEqual(parent_review.status_code, 403, parent_review.text)
+        parent_today = self.client.get("/api/courses/" + str(course_id) + "/today", headers=parent)
+        self.assertEqual(parent_today.status_code, 403, parent_today.text)
+
+        wrong_book = self.client.get("/api/courses/" + str(course_id) + "/wrong-book", headers=parent)
+        self.assertEqual(wrong_book.status_code, 200, wrong_book.text)
+        self.assertTrue(any(item["id"] == point_id for item in wrong_book.json()["items"]))
+        self.assertFalse(wrong_book.json()["canDrill"])
+
+        kid_book = self.client.get("/api/courses/" + str(course_id) + "/wrong-book", headers=self.kid)
+        self.assertTrue(kid_book.json()["canDrill"])
+        replay = self.client.get(
+            "/api/courses/" + str(course_id) + "/today?wrongBook=1",
+            headers=self.kid,
+        )
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertTrue(replay.json().get("wrongBook"))
+        self.assertEqual(replay.json().get("mode"), "test")
+        self.assertTrue(any(item["id"] == point_id for item in replay.json()["items"]))
+
+        week = self.client.get("/api/courses/" + str(course_id) + "/week", headers=parent)
+        self.assertEqual(week.status_code, 200, week.text)
+        self.assertGreaterEqual(week.json()["daysPracticed"], 1)
+        self.assertTrue(week.json()["summary"])
+
+        pref = self.client.patch(
+            "/api/courses/" + str(course_id),
+            json={"reviewDefaultTest": True, "dailyMinutesCap": 15},
+            headers=parent,
+        )
+        self.assertEqual(pref.status_code, 200, pref.text)
+        self.assertTrue(pref.json()["reviewDefaultTest"])
+        self.assertEqual(pref.json()["dailyMinutesCap"], 15)
+
+        wizard = self.client.get("/api/wizard?grade=三年级上", headers=parent)
+        self.assertEqual(wizard.status_code, 200, wizard.text)
+        self.assertEqual(wizard.json()["plan"]["grade"], "三年级上")
+        created = self.client.post(
+            "/api/courses",
+            json={
+                "wizard": True,
+                "studentId": kid_id,
+                "grades": ["三年级上"],
+                "name": "接口课-向导-" + self.marker,
+            },
+            headers=parent,
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        self.assertGreater(created.json()["itemCount"], 0)
+        self.assertEqual(created.json()["studentId"], kid_id)
+        self.assertIn("三年级上", created.json()["grades"])
+
 
 if __name__ == "__main__":
     unittest.main()

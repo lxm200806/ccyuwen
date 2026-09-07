@@ -7,6 +7,7 @@ from psycopg.rows import dict_row
 
 from .auth import hash_password
 from .cards import KINDS, LEVELS, decode_filters, encode_filters, fill_group_fields
+from .family import DEMO_LINK_CODE, DEMO_PARENT_NAME, DEMO_STUDENT_NAME, generate_link_code
 from .materials import sync_all_official
 
 DATABASE_URL = os.environ.get(
@@ -19,7 +20,15 @@ CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     name TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('admin', 'user'))
+    role TEXT NOT NULL CHECK (role IN ('admin', 'user', 'parent')),
+    link_code TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS family_links (
+    parent_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (parent_id, student_id)
 );
 
 CREATE TABLE IF NOT EXISTS resources (
@@ -117,7 +126,16 @@ CREATE TABLE IF NOT EXISTS courses (
     new_energy INTEGER NOT NULL DEFAULT 30,
     review_energy INTEGER NOT NULL DEFAULT 30,
     review_default_test BOOLEAN NOT NULL DEFAULT FALSE,
+    daily_minutes_cap INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS study_time (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+    day DATE NOT NULL,
+    seconds INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, course_id, day)
 );
 
 CREATE TABLE IF NOT EXISTS course_items (
@@ -180,6 +198,8 @@ def init_db():
             _migrate(cur)
             _ensure_user(cur, "admin", "admin123", "admin")
             _ensure_user(cur, "kid", "kid123", "user")
+            _ensure_user(cur, "parent", "parent123", "parent")
+            _seed_family_demo(cur)
             _seed_official_packs(cur)
             _seed_default_courses(cur)
         conn.commit()
@@ -192,6 +212,30 @@ def _migrate(cur):
     cur.execute("ALTER TABLE courses ADD COLUMN IF NOT EXISTS new_energy INTEGER NOT NULL DEFAULT 30")
     cur.execute("ALTER TABLE courses ADD COLUMN IF NOT EXISTS review_energy INTEGER NOT NULL DEFAULT 30")
     cur.execute("ALTER TABLE courses ADD COLUMN IF NOT EXISTS review_default_test BOOLEAN NOT NULL DEFAULT FALSE")
+    cur.execute("ALTER TABLE courses ADD COLUMN IF NOT EXISTS daily_minutes_cap INTEGER NOT NULL DEFAULT 0")
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS link_code TEXT NOT NULL DEFAULT ''")
+    _relax_user_role_check(cur)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS family_links (
+            parent_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (parent_id, student_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS study_time (
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+            day DATE NOT NULL,
+            seconds INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (user_id, course_id, day)
+        )
+        """
+    )
     cur.execute("ALTER TABLE knowledge_draft ADD COLUMN IF NOT EXISTS grade TEXT NOT NULL DEFAULT ''")
     cur.execute("ALTER TABLE knowledge_published ADD COLUMN IF NOT EXISTS grade TEXT NOT NULL DEFAULT ''")
     cur.execute("ALTER TABLE knowledge_draft ADD COLUMN IF NOT EXISTS point_key TEXT NOT NULL DEFAULT ''")
@@ -363,13 +407,45 @@ def _backfill_entries(cur):
         upsert_entry(cur, row)
 
 
+def _relax_user_role_check(cur):
+    cur.execute(
+        """
+        SELECT conname FROM pg_constraint
+        WHERE conrelid = 'users'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%role%'
+        """
+    )
+    for row in cur.fetchall():
+        cur.execute("ALTER TABLE users DROP CONSTRAINT IF EXISTS " + row["conname"])
+    cur.execute("ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin', 'user', 'parent'))")
+
+
 def _ensure_user(cur, name, password, role):
     cur.execute("SELECT id FROM users WHERE name = %s", (name,))
     if cur.fetchone():
         return
+    code = DEMO_LINK_CODE if name == DEMO_STUDENT_NAME else (generate_link_code() if role == "user" else "")
     cur.execute(
-        "INSERT INTO users (name, password_hash, role) VALUES (%s, %s, %s)",
-        (name, hash_password(password), role),
+        "INSERT INTO users (name, password_hash, role, link_code) VALUES (%s, %s, %s, %s)",
+        (name, hash_password(password), role, code),
+    )
+
+
+def _seed_family_demo(cur):
+    cur.execute("SELECT id, link_code FROM users WHERE name = %s AND role = 'user'", (DEMO_STUDENT_NAME,))
+    kid = cur.fetchone()
+    if kid and not (kid.get("link_code") or "").strip():
+        cur.execute("UPDATE users SET link_code = %s WHERE id = %s", (DEMO_LINK_CODE, kid["id"]))
+    cur.execute("SELECT id FROM users WHERE name = %s AND role = 'parent'", (DEMO_PARENT_NAME,))
+    parent = cur.fetchone()
+    if not kid or not parent:
+        return
+    cur.execute(
+        """
+        INSERT INTO family_links (parent_id, student_id)
+        VALUES (%s, %s)
+        ON CONFLICT (parent_id, student_id) DO NOTHING
+        """,
+        (parent["id"], kid["id"]),
     )
 
 
