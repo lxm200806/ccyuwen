@@ -14,6 +14,8 @@ from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "server"))
+from app.entries import encode_options, fill_entry_fields, make_char_judge_card, make_meaning_card, meaning_hint
 OUT_DIR = ROOT / "raw" / "idioms"
 SEED = OUT_DIR / "seed_all_candidates.txt"
 TEXTBOOK = OUT_DIR / "textbook_by_grade.json"
@@ -122,28 +124,20 @@ def load_existing_pack() -> list[dict]:
     return list(data.get("points") or [])
 
 
-def load_existing_keys() -> dict[str, str]:
-    snapshot = OUT_DIR / "_keys_before.json"
-    if snapshot.is_file():
-        extra = json.loads(snapshot.read_text(encoding="utf-8"))
-        keys: dict[str, str] = {}
-        if isinstance(extra, dict):
-            for answer, key in extra.items():
-                word = str(answer or "").strip()
-                kept = str(key or "").strip()
-                if word and kept:
-                    keys[word] = kept
-        return keys
-    keys = {}
+def load_existing_keys() -> tuple[dict[str, str], set[str]]:
+    keys: dict[str, str] = {}
     reserved: set[str] = set()
     for point in load_existing_pack():
-        answer = str(point.get("answer") or "").strip()
         key = str(point.get("key") or "").strip()
-        if not answer or not key or answer in keys or key in reserved:
+        if key:
+            reserved.add(key)
+        qtype = str(point.get("question_type") or "dictation").strip() or "dictation"
+        if qtype not in {"dictation", "recite"}:
             continue
-        keys[answer] = key
-        reserved.add(key)
-    return keys
+        lemma = str(point.get("lemma") or point.get("answer") or "").strip()
+        if lemma and key and lemma not in keys:
+            keys[lemma] = key
+    return keys, reserved
 
 
 def assign_key(word: str, existing: dict[str, str], used: set[str], reserved: set[str]) -> str:
@@ -582,8 +576,8 @@ def build() -> dict:
     xinhua = load_xinhua()
     textbook = load_textbook()
     l1 = set(textbook)
-    existing_keys = load_existing_keys()
-    reserved_keys = set(existing_keys.values())
+    existing_keys, reserved_keys = load_existing_keys()
+    reserved_keys = set(reserved_keys)
     seeds = [w.strip() for w in SEED.read_text(encoding="utf-8").splitlines() if w.strip()]
     for w in existing_keys:
         if w not in seeds:
@@ -607,7 +601,7 @@ def build() -> dict:
         key=lambda w: priority(w, l1, theme_of(w)),
     )
 
-    points = []
+    bases = []
     used_keys: set[str] = set()
     for i, word in enumerate(ranked, 1):
         theme = theme_of(word)
@@ -621,39 +615,52 @@ def build() -> dict:
             tags = book["tags"]
             source = book["source"]
             grade = book["grade"]
-            group = book["group"]
-            sub_group = book["sub_group"]
         elif level == "L2":
             tags = f"成语;{theme};课内拓展"
             source = "小学成语培优全书·教辅常见"
             grade = ""
-            group = f"成语-{theme}"
-            sub_group = level
         else:
             tags = f"成语;{theme};小升初高频"
             source = "小学成语培优全书·教辅常见"
             grade = ""
-            group = f"成语-{theme}"
-            sub_group = level
         key = assign_key(word, existing_keys, used_keys, reserved_keys)
         used_keys.add(key)
-        points.append(
-            {
-                "key": key,
-                "kind": "idiom",
-                "level": level,
-                "grade": grade,
-                "prompt": make_prompt(hint, word),
-                "answer": word,
-                "tags": tags,
-                "source": source,
-                "group": group,
-                "sub_group": sub_group,
-            }
-        )
+        reserved_keys.add(key)
+        card = {
+            "key": key,
+            "kind": "idiom",
+            "level": level,
+            "grade": grade,
+            "prompt": make_prompt(hint, word),
+            "answer": word,
+            "tags": tags,
+            "source": source,
+            "lemma": word,
+            "question_type": "recite",
+            "audience": "all",
+        }
+        if book:
+            card["sub_group"] = book.get("sub_group") or book.get("section") or ""
+        bases.append(fill_entry_fields(card))
+    pool = [meaning_hint(item) for item in bases]
+    points = []
+    for base in bases:
+        points.append(base)
+        judge = make_char_judge_card(base)
+        meaning = make_meaning_card(base, pool)
+        for extra in (judge, meaning):
+            extra_key = str(extra.get("key") or "")
+            if extra_key in used_keys:
+                n = 1
+                while f"{extra_key}-{n}" in used_keys:
+                    n += 1
+                extra["key"] = f"{extra_key}-{n}"
+            used_keys.add(extra["key"])
+            extra["options"] = encode_options(extra.get("options"))
+            points.append(extra)
     return {
         "title": "小学成语",
-        "version": 3,
+        "version": 4,
         "count": len(points),
         "points": points,
     }
@@ -664,19 +671,24 @@ def main() -> int:
     pack = build()
     points = pack["points"]
     assert points, "no idioms"
-    assert len({p["answer"] for p in points}) == len(points)
+    assert len({p["key"] for p in points}) == len(points)
+    lemmas = [p for p in points if (p.get("question_type") or "") in {"recite", "dictation"}]
+    assert lemmas, "no recite cards"
+    assert len({p.get("lemma") or p["answer"] for p in lemmas}) == len(lemmas)
 
-    # soft validate lengths
-    for p in points:
-        n = len(re.sub(r"\s+", "", p["answer"]))
+    for p in lemmas:
+        n = len(re.sub(r"\s+", "", p.get("lemma") or p["answer"]))
         if not 3 <= n <= 8:
-            raise SystemExit(f"bad length {p['answer']}")
+            raise SystemExit(f"bad length {p.get('lemma') or p['answer']}")
 
     json_path = OUT_DIR / JSON_NAME
     csv_path = OUT_DIR / CSV_NAME
     json_path.write_text(json.dumps(pack, ensure_ascii=False, indent=2), encoding="utf-8")
     with csv_path.open("w", encoding="utf-8", newline="") as fh:
-        fields = ["kind", "level", "grade", "prompt", "answer", "tags", "source", "key", "group", "sub_group"]
+        fields = [
+            "kind", "level", "grade", "prompt", "answer", "tags", "source", "key", "group", "sub_group",
+            "entry_key", "lemma", "question_type", "audience", "options",
+        ]
         w = csv.DictWriter(fh, fieldnames=fields)
         w.writeheader()
         for p in points:
@@ -684,22 +696,23 @@ def main() -> int:
 
     PRINTABLE_MD.write_text(printable_markdown(load_textbook_blocks()), encoding="utf-8")
 
-    levels = Counter(p["level"] for p in points)
-    grades = Counter(p["grade"] for p in points if p.get("grade"))
-    themes = Counter((p["tags"].split(";")[1] if ";" in p["tags"] else "") for p in points)
-    readme = f"""# 小学成语（{pack['count']} 条）
+    levels = Counter(p["level"] for p in lemmas)
+    grades = Counter(p["grade"] for p in lemmas if p.get("grade"))
+    themes = Counter((p["tags"].split(";")[1] if ";" in p["tags"] else "") for p in lemmas)
+    qtypes = Counter(p.get("question_type") or "dictation" for p in points)
+    readme = f"""# 小学成语（{len(lemmas)} 个词条 · {pack['count']} 张卡片）
 
-面向小学生、教辅与小升初常见考点的成语知识点包。候选清单里收集到的四字成语全部收录。
+面向小学生、教辅与小升初常见考点的成语知识点包。每个词条三张学习卡：背诵、低年级字对错、高年级理解意思。
 
 课内必背以 `textbook_by_grade.json` 为准（统编 1–6 年级，分日积月累 / 课文），带年级。打印原文见 `raw/小学成语.md`。
 
 ## 文件
 
 - `{CSV_NAME}`：CSV 备份
-- `{JSON_NAME}`：含稳定 `key` / `group`，官方材料同步用
+- `{JSON_NAME}`：含稳定 `key` / `entry_key`，官方材料同步用
 - `textbook_by_grade.json`：统编课内成语分类（权威清单）
 
-## 级别分布
+## 级别分布（按词条）
 
 | 级别 | 含义 | 数量 |
 |---|---|---|
@@ -709,28 +722,29 @@ def main() -> int:
 
 课内按年级：{'；'.join(f'{g} {n}' for g, n in sorted(grades.items(), key=lambda item: GRADE_ORDER.index(item[0])))}
 
+出题类型：{'；'.join(f'{k} {n}' for k, n in qtypes.most_common())}
+
 ## 导入
 
-已作为官方材料「小学成语」，在「原始资料」同步后直接进知识库，不用审核。改本目录 JSON 后做增量同步即可。
+已作为官方材料「小学成语」，在「原始资料」同步后直接进知识库，不用审核。改本目录 JSON 后做增量同步即可。背诵卡沿用原 `point_key`，考试卡为 `原key:char_judge` / `原key:meaning_choice`。
 
 ## 说明
 
-- 词条来自小学教辅高频分类与统编课内成语，释义提示面向默写。
+- 词条来自小学教辅高频分类与统编课内成语。
 - 同一成语若跨册出现，按首次出现的年级收录，出处里保留全部册次。
-- 开源成语库仅用于补全短提示；当前共 {pack['count']} 条。
+- 开源成语库仅用于补全短提示；当前共 {len(lemmas)} 个词条、{pack['count']} 张卡片。
 """
     (OUT_DIR / "README.md").write_text(readme, encoding="utf-8")
-    # also keep seed snapshot in repo for reproducibility
     (OUT_DIR / "seed_words.txt").write_text(
-        "\n".join(p["answer"] for p in points) + "\n", encoding="utf-8"
+        "\n".join((p.get("lemma") or p["answer"]) for p in lemmas) + "\n", encoding="utf-8"
     )
     print("count", len(points))
     print("levels", dict(levels))
     print("grades", dict(grades))
     print("themes", themes.most_common(15))
     print("sample")
-    for p in points[:8]:
-        print(p["level"], p.get("grade") or "-", p["answer"], p["source"], p["prompt"])
+    for p in lemmas[:8]:
+        print(p["level"], p.get("grade") or "-", p.get("lemma") or p["answer"], p["source"], p["prompt"])
     return 0
 
 

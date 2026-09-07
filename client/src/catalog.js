@@ -50,3 +50,37 @@ export function kindLabel(kind) {
 export function levelLabel(level) {
 	return LEVEL_LABEL[level] || level
 }
+
+export const QUESTION_TYPE_OPTIONS = [
+	{ id: 'dictation', label: '默写' },
+	{ id: 'recite', label: '背诵' },
+	{ id: 'char_judge', label: '字对错' },
+	{ id: 'meaning_choice', label: '理解意思' }
+]
+
+export const QUESTION_TYPE_LABEL = {
+	dictation: '默写',
+	recite: '背诵',
+	char_judge: '字对错',
+	meaning_choice: '理解意思'
+}
+
+export const AUDIENCE_OPTIONS = [
+	{ id: 'all', label: '全年级' },
+	{ id: 'lower', label: '低年级' },
+	{ id: 'upper', label: '高年级' }
+]
+
+export const AUDIENCE_LABEL = {
+	all: '全年级',
+	lower: '低年级',
+	upper: '高年级'
+}
+
+export function questionTypeLabel(value) {
+	return QUESTION_TYPE_LABEL[value] || value || '默写'
+}
+
+export function audienceLabel(value) {
+	return AUDIENCE_LABEL[value] || value || '全年级'
+}

@@ -49,6 +49,11 @@ CREATE TABLE IF NOT EXISTS knowledge_draft (
     point_key TEXT NOT NULL DEFAULT '',
     group_key TEXT NOT NULL DEFAULT '',
     sub_group_key TEXT NOT NULL DEFAULT '',
+    entry_key TEXT NOT NULL DEFAULT '',
+    lemma TEXT NOT NULL DEFAULT '',
+    question_type TEXT NOT NULL DEFAULT 'dictation',
+    audience TEXT NOT NULL DEFAULT 'all',
+    options TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'discarded', 'published')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -67,8 +72,38 @@ CREATE TABLE IF NOT EXISTS knowledge_published (
     point_key TEXT NOT NULL DEFAULT '',
     group_key TEXT NOT NULL DEFAULT '',
     sub_group_key TEXT NOT NULL DEFAULT '',
+    entry_key TEXT NOT NULL DEFAULT '',
+    lemma TEXT NOT NULL DEFAULT '',
+    question_type TEXT NOT NULL DEFAULT 'dictation',
+    audience TEXT NOT NULL DEFAULT 'all',
+    options TEXT NOT NULL DEFAULT '',
     embedding BYTEA,
     published_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_entry (
+    id SERIAL PRIMARY KEY,
+    entry_key TEXT UNIQUE NOT NULL,
+    kind TEXT NOT NULL,
+    lemma TEXT NOT NULL DEFAULT '',
+    grade TEXT NOT NULL DEFAULT '',
+    grades TEXT NOT NULL DEFAULT '',
+    levels TEXT NOT NULL DEFAULT '',
+    tags TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_entry_grade (
+    entry_key TEXT NOT NULL,
+    grade TEXT NOT NULL,
+    PRIMARY KEY (entry_key, grade)
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_entry_level (
+    entry_key TEXT NOT NULL,
+    level TEXT NOT NULL,
+    PRIMARY KEY (entry_key, level)
 );
 
 CREATE TABLE IF NOT EXISTS courses (
@@ -165,6 +200,53 @@ def _migrate(cur):
     cur.execute("ALTER TABLE knowledge_published ADD COLUMN IF NOT EXISTS group_key TEXT NOT NULL DEFAULT ''")
     cur.execute("ALTER TABLE knowledge_draft ADD COLUMN IF NOT EXISTS sub_group_key TEXT NOT NULL DEFAULT ''")
     cur.execute("ALTER TABLE knowledge_published ADD COLUMN IF NOT EXISTS sub_group_key TEXT NOT NULL DEFAULT ''")
+    cur.execute("ALTER TABLE knowledge_draft ADD COLUMN IF NOT EXISTS entry_key TEXT NOT NULL DEFAULT ''")
+    cur.execute("ALTER TABLE knowledge_published ADD COLUMN IF NOT EXISTS entry_key TEXT NOT NULL DEFAULT ''")
+    cur.execute("ALTER TABLE knowledge_draft ADD COLUMN IF NOT EXISTS lemma TEXT NOT NULL DEFAULT ''")
+    cur.execute("ALTER TABLE knowledge_published ADD COLUMN IF NOT EXISTS lemma TEXT NOT NULL DEFAULT ''")
+    cur.execute("ALTER TABLE knowledge_draft ADD COLUMN IF NOT EXISTS question_type TEXT NOT NULL DEFAULT 'dictation'")
+    cur.execute("ALTER TABLE knowledge_published ADD COLUMN IF NOT EXISTS question_type TEXT NOT NULL DEFAULT 'dictation'")
+    cur.execute("ALTER TABLE knowledge_draft ADD COLUMN IF NOT EXISTS audience TEXT NOT NULL DEFAULT 'all'")
+    cur.execute("ALTER TABLE knowledge_published ADD COLUMN IF NOT EXISTS audience TEXT NOT NULL DEFAULT 'all'")
+    cur.execute("ALTER TABLE knowledge_draft ADD COLUMN IF NOT EXISTS options TEXT NOT NULL DEFAULT ''")
+    cur.execute("ALTER TABLE knowledge_published ADD COLUMN IF NOT EXISTS options TEXT NOT NULL DEFAULT ''")
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS knowledge_entry (
+            id SERIAL PRIMARY KEY,
+            entry_key TEXT UNIQUE NOT NULL,
+            kind TEXT NOT NULL,
+            lemma TEXT NOT NULL DEFAULT '',
+            grade TEXT NOT NULL DEFAULT '',
+            tags TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT '',
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+    cur.execute("ALTER TABLE knowledge_entry ADD COLUMN IF NOT EXISTS grades TEXT NOT NULL DEFAULT ''")
+    cur.execute("ALTER TABLE knowledge_entry ADD COLUMN IF NOT EXISTS levels TEXT NOT NULL DEFAULT ''")
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS knowledge_entry_grade (
+            entry_key TEXT NOT NULL,
+            grade TEXT NOT NULL,
+            PRIMARY KEY (entry_key, grade)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS knowledge_entry_level (
+            entry_key TEXT NOT NULL,
+            level TEXT NOT NULL,
+            PRIMARY KEY (entry_key, level)
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS knowledge_entry_grade_grade_idx ON knowledge_entry_grade (grade)")
+    cur.execute("CREATE INDEX IF NOT EXISTS knowledge_published_entry_key_idx ON knowledge_published (entry_key)")
+    cur.execute("CREATE INDEX IF NOT EXISTS knowledge_published_question_type_idx ON knowledge_published (question_type)")
     cur.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS slug TEXT NOT NULL DEFAULT ''")
     cur.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS synced_version INTEGER NOT NULL DEFAULT 0")
     cur.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS synced_hash TEXT NOT NULL DEFAULT ''")
@@ -211,12 +293,14 @@ def _migrate(cur):
                 (encode_filters(current, KINDS), row["id"]),
             )
     _backfill_group_keys(cur)
+    _backfill_entries(cur)
 
 
 def _backfill_group_keys(cur):
     cur.execute(
         """
-        SELECT id, kind, level, grade, prompt, answer, tags, source, point_key, group_key, sub_group_key
+        SELECT id, kind, level, grade, prompt, answer, tags, source, point_key, group_key, sub_group_key,
+               entry_key, lemma, question_type, audience, options
         FROM knowledge_published
         """
     )
@@ -231,15 +315,52 @@ def _backfill_group_keys(cur):
                 "answer": row["answer"],
                 "tags": row.get("tags") or "",
                 "source": row.get("source") or "",
+                "entry_key": row.get("entry_key") or "",
+                "lemma": row.get("lemma") or "",
+                "question_type": row.get("question_type") or "dictation",
+                "audience": row.get("audience") or "all",
+                "options": row.get("options") or "",
             }
         )
-        if (row.get("group_key") or "") != filled["group_key"] or (row.get("sub_group_key") or "") != filled[
-            "sub_group_key"
-        ]:
+        if (
+            (row.get("group_key") or "") != filled["group_key"]
+            or (row.get("sub_group_key") or "") != filled["sub_group_key"]
+            or (row.get("entry_key") or "") != (filled.get("entry_key") or "")
+            or (row.get("lemma") or "") != (filled.get("lemma") or "")
+        ):
             cur.execute(
-                "UPDATE knowledge_published SET group_key = %s, sub_group_key = %s WHERE id = %s",
-                (filled["group_key"], filled["sub_group_key"], row["id"]),
+                """
+                UPDATE knowledge_published
+                SET group_key = %s, sub_group_key = %s, entry_key = %s, lemma = %s,
+                    question_type = %s, audience = %s, options = %s
+                WHERE id = %s
+                """,
+                (
+                    filled["group_key"],
+                    filled["sub_group_key"],
+                    filled.get("entry_key") or "",
+                    filled.get("lemma") or "",
+                    filled.get("question_type") or "dictation",
+                    filled.get("audience") or "all",
+                    filled.get("options") or "",
+                    row["id"],
+                ),
             )
+
+
+def _backfill_entries(cur):
+    cur.execute(
+        """
+        SELECT entry_key, kind, lemma, grade, level, tags, source
+        FROM knowledge_published
+        WHERE entry_key <> ''
+        ORDER BY id
+        """
+    )
+    from .materials import upsert_entry
+
+    for row in cur.fetchall():
+        upsert_entry(cur, row)
 
 
 def _ensure_user(cur, name, password, role):

@@ -58,3 +58,53 @@ def grade_answer(user_input, expected):
         "correct": quality == 5,
         "chars": diff_chars(typed, answer),
     }
+
+
+def normalize_judge(value):
+    text = normalize(value)
+    aliases = {"对": "对", "正确": "对", "true": "对", "1": "对", "yes": "对", "错": "错", "错误": "错", "false": "错", "0": "错", "no": "错"}
+    return aliases.get(text.lower(), text)
+
+
+def grade_char_judge(user_input, expected):
+    typed = normalize_judge(user_input)
+    answer = normalize_judge(expected)
+    correct = bool(typed) and typed == answer
+    return {
+        "quality": 5 if correct else 1,
+        "ratio": 1 if correct else 0,
+        "correct": correct,
+        "chars": [],
+    }
+
+
+def grade_choice(user_input, expected):
+    typed = normalize(user_input)
+    answer = normalize(expected)
+    if not answer:
+        return {"quality": 1, "ratio": 0, "correct": False, "chars": []}
+    correct = bool(typed) and typed == answer
+    return {
+        "quality": 5 if correct else 1,
+        "ratio": 1 if correct else 0,
+        "correct": correct,
+        "chars": [],
+    }
+
+
+def grade_card(point, user_input, reveal=False):
+    from .entries import normalize_question_type
+
+    qtype = normalize_question_type((point or {}).get("question_type"))
+    expected = (point or {}).get("answer") or ""
+    if reveal:
+        if qtype == "char_judge":
+            return grade_char_judge("", expected)
+        if qtype == "meaning_choice":
+            return grade_choice("", expected)
+        return grade_answer("", expected)
+    if qtype == "char_judge":
+        return grade_char_judge(user_input, expected)
+    if qtype == "meaning_choice":
+        return grade_choice(user_input, expected)
+    return grade_answer(user_input, expected)

@@ -42,8 +42,9 @@
 				<p v-if="card.parts > 1" class="muted">大卡拆天：{{ card.part }} / {{ card.parts }}</p>
 				<p class="muted">知识点 {{ index + 1 }} / {{ queue.length }} · 本条 {{ card.energy || 0 }} 能</p>
 				<p v-if="card.source && mode !== 'test'" class="muted">{{ card.source }}</p>
+				<p class="muted">{{ questionTypeLabel(questionType) }}<template v-if="card.lemma && !isJudgeWidget"> · {{ card.lemma }}</template></p>
 				<h2>{{ card.prompt }}</h2>
-				<template v-if="mode === 'recite' && !result">
+				<template v-if="isReciteWidget && !result">
 					<button class="danger" type="button" :disabled="busy" @click="speak">听写朗读</button>
 					<div class="recite-lines" aria-live="polite">
 						<p
@@ -73,6 +74,26 @@
 						<textarea id="answer" v-model="answer" :disabled="busy"></textarea>
 						<button class="ghost" type="button" :disabled="busy" @click="submit(false)">核对</button>
 					</details>
+				</template>
+				<template v-else-if="isJudgeWidget && !result">
+					<p class="judge-display">{{ judgeDisplay }}</p>
+					<div class="choice-row">
+						<button type="button" :disabled="busy" @click="pickAnswer('对')">对</button>
+						<button class="ghost" type="button" :disabled="busy" @click="pickAnswer('错')">错</button>
+					</div>
+					<button class="ghost" type="button" :disabled="busy" @click="speak">朗读</button>
+				</template>
+				<template v-else-if="isChoiceWidget && !result">
+					<div class="choice-list">
+						<button
+							v-for="(choice, choiceIndex) in choiceOptions"
+							:key="choiceIndex"
+							class="ghost choice-btn"
+							type="button"
+							:disabled="busy"
+							@click="pickAnswer(choice)"
+						>{{ choice }}</button>
+					</div>
 				</template>
 				<template v-else-if="!result">
 					<label for="answer">默写答案</label>
@@ -127,7 +148,7 @@
 			<details class="energy-help">
 				<summary>「能」是什么？</summary>
 				<p>
-					「能」是今天的学习量：字 1、词语 2、成语 4，古诗 / 文言文按篇幅。每天先按复习能量收到期的学习卡，再按新学能量收还没学过的卡。一张学习卡是同一模块的几条知识点，捆在一起默写。
+					「能」是今天的学习量：字 1、词语 2、成语背诵 2、字对错 1–2、理解意思 2–4，古诗 / 文言文按篇幅。每天先按复习能量收到期的学习卡，再按新学能量收还没学过的卡。同一词条的几张卡片捆成一张学习卡一起练，对错仍按单卡记。
 				</p>
 			</details>
 		</template>
@@ -139,7 +160,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { request } from '../api.js'
-import { kindLabel, levelLabel } from '../catalog.js'
+import { kindLabel, levelLabel, questionTypeLabel } from '../catalog.js'
 
 const FALLBACK_MODES = [
 	{ id: 'learn', label: '学习', hint: '先练会' },
@@ -168,6 +189,23 @@ const sessionAttempts = ref(0)
 const revealedCount = ref(0)
 
 const card = computed(() => queue.value[index.value] || null)
+const questionType = computed(() => (card.value && (card.value.questionType || card.value.question_type)) || 'dictation')
+const isJudgeWidget = computed(() => questionType.value === 'char_judge')
+const isChoiceWidget = computed(() => questionType.value === 'meaning_choice')
+const isReciteWidget = computed(() => {
+	if (mode.value === 'test' || isJudgeWidget.value || isChoiceWidget.value) {
+		return false
+	}
+	return questionType.value === 'recite' || mode.value === 'recite'
+})
+const judgeDisplay = computed(() => {
+	const options = (card.value && card.value.options) || {}
+	return options.display || (card.value && card.value.lemma) || ''
+})
+const choiceOptions = computed(() => {
+	const options = (card.value && card.value.options) || {}
+	return Array.isArray(options.choices) ? options.choices : []
+})
 const reciteLines = computed(() => {
 	if (!card.value) {
 		return []
@@ -400,12 +438,23 @@ function revealAll() {
 	revealedCount.value = reciteLines.value.length
 }
 
+function pickAnswer(value) {
+	answer.value = value
+	submit(false)
+}
+
 function speak() {
 	if (!card.value || !window.speechSynthesis) {
 		return
 	}
 	window.speechSynthesis.cancel()
-	const utter = new SpeechSynthesisUtterance(card.value.prompt)
+	let text = card.value.prompt
+	if (isJudgeWidget.value) {
+		text = judgeDisplay.value || text
+	} else if (card.value.lemma) {
+		text = card.value.lemma
+	}
+	const utter = new SpeechSynthesisUtterance(text)
 	utter.lang = 'zh-CN'
 	utter.rate = 0.85
 	window.speechSynthesis.speak(utter)

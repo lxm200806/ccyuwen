@@ -1,7 +1,7 @@
 <template>
 	<section class="card">
 		<h2>从已发布库生成课程</h2>
-		<p class="muted">按年级、类型、级别筛选。每条知识点都带来源，方便对照教材。组课页不显示答案；要看答案请去「知识点」。</p>
+		<p class="muted">按年级、类型、级别筛选。教材和小学成语里允许重复；组课时同一词条同一题型只收一张卡。若这个成语既属一年级又属二年级，两门课里都会出现，可以再学一遍。组课页不显示答案；要看答案请去「知识点」。</p>
 		<label for="course-name">课程名称</label>
 		<input id="course-name" v-model="name">
 		<label for="course-note">备注</label>
@@ -43,7 +43,7 @@
 		<p class="muted">
 			<template v-if="loading">正在按当前筛选预览…</template>
 			<template v-else>
-				当前筛选 {{ total }} 条。
+				当前筛选 {{ entryCount }} 个词条、{{ total }} 张卡片。
 				<template v-if="preview.dayCount">
 					约 {{ preview.groupCount }} 张学习卡、{{ preview.totalEnergy }} 能量；新学约 {{ preview.newDayCount || preview.dayCount }} 天，含复习共 {{ preview.dayCount }} 天（按全对估算）。
 				</template>
@@ -58,7 +58,7 @@
 		<p v-if="error" class="error">{{ error }}</p>
 		<ul>
 			<li v-for="point in points" :key="point.id">
-				{{ point.grade || '未分年级' }} · {{ kindLabel(point.kind) }} · {{ point.level }} · {{ point.prompt }}
+				{{ point.entryGrades || point.grade || '未分年级' }} · {{ kindLabel(point.kind) }} · {{ questionTypeLabel(point.questionType || point.question_type) }} · {{ point.level }} · {{ point.lemma || point.prompt }}
 				<span class="muted"> {{ point.source }} · {{ point.energy || 0 }} 能</span>
 			</li>
 		</ul>
@@ -68,7 +68,7 @@
 <script setup>
 import { onMounted, ref, watch } from 'vue'
 import { request } from '../api.js'
-import { GRADE_OPTIONS, KIND_OPTIONS, LEVEL_OPTIONS, kindLabel } from '../catalog.js'
+import { GRADE_OPTIONS, KIND_OPTIONS, LEVEL_OPTIONS, kindLabel, questionTypeLabel } from '../catalog.js'
 
 const kindOptions = KIND_OPTIONS
 const levelOptions = LEVEL_OPTIONS
@@ -82,46 +82,67 @@ const name = ref('三年级上册默写')
 const note = ref('部编三年级上册必背与日积月累')
 const points = ref([])
 const total = ref(0)
+const entryCount = ref(0)
 const preview = ref({})
 const message = ref('')
 const error = ref('')
 const loading = ref(false)
 const busy = ref(false)
+let loadTicket = 0
 
 async function loadLibrary() {
 	error.value = ''
 	if (!kinds.value.length || !levels.value.length) {
 		points.value = []
 		total.value = 0
+		entryCount.value = 0
 		preview.value = {}
 		return
 	}
+	const ticket = ++loadTicket
+	const selectedKinds = kinds.value.slice()
+	const selectedLevels = levels.value.slice()
+	const selectedGrades = grades.value.slice()
+	const selectedNew = newEnergy.value
+	const selectedReview = reviewEnergy.value
 	loading.value = true
 	try {
 		const params = new URLSearchParams()
-		params.set('kinds', kinds.value.join(','))
-		params.set('levels', levels.value.join(','))
-		if (grades.value.length) {
-			params.set('grades', grades.value.join(','))
+		params.set('kinds', selectedKinds.join(','))
+		params.set('levels', selectedLevels.join(','))
+		if (selectedGrades.length) {
+			params.set('grades', selectedGrades.join(','))
 		}
 		params.set('limit', '500')
 		const data = await request('/library?' + params.toString())
+		if (ticket !== loadTicket) {
+			return
+		}
 		points.value = data.items || []
 		total.value = data.total || 0
+		entryCount.value = data.entryCount || data.total || 0
 		preview.value = await request('/courses/preview', {
 			method: 'POST',
 			body: JSON.stringify({
-				kinds: kinds.value,
-				levels: levels.value,
-				grades: grades.value,
-				newEnergy: newEnergy.value,
-				reviewEnergy: reviewEnergy.value
+				kinds: selectedKinds,
+				levels: selectedLevels,
+				grades: selectedGrades,
+				newEnergy: selectedNew,
+				reviewEnergy: selectedReview
 			})
 		})
+		if (ticket !== loadTicket) {
+			return
+		}
 	} catch (err) {
+		if (ticket !== loadTicket) {
+			return
+		}
 		error.value = err.message
 	} finally {
-		loading.value = false
+		if (ticket === loadTicket) {
+			loading.value = false
+		}
 	}
 }
 

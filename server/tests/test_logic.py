@@ -29,8 +29,20 @@ from app.cards import (
     point_energy,
     validate_card,
 )
-from app.grade import grade_answer, normalize
+from app.grade import grade_answer, grade_card, grade_char_judge, grade_choice, normalize
 from app.sm2 import add_days, is_mastered, schedule
+
+
+def recite_points(points):
+    return [
+        point
+        for point in points
+        if (point.get("question_type") or "dictation") in {"recite", "dictation"}
+    ]
+
+
+def points_by_lemma(points):
+    return {(point.get("lemma") or point.get("answer") or ""): point for point in recite_points(points)}
 
 
 class GradeTests(unittest.TestCase):
@@ -51,6 +63,19 @@ class GradeTests(unittest.TestCase):
 
     def test_idiom_typo(self):
         self.assertEqual(grade_answer("守株侍兔", "守株待兔")["quality"], 1)
+
+    def test_char_judge_and_choice(self):
+        self.assertEqual(grade_char_judge("对", "对")["quality"], 5)
+        self.assertEqual(grade_char_judge("错", "对")["quality"], 1)
+        self.assertEqual(grade_char_judge("正确", "对")["quality"], 5)
+        self.assertEqual(grade_choice("做事认真", "做事认真")["quality"], 5)
+        self.assertEqual(grade_choice("1", "做事认真")["quality"], 1)
+        judged = grade_card({"question_type": "char_judge", "answer": "错"}, "错")
+        self.assertTrue(judged["correct"])
+        choice = grade_card({"question_type": "meaning_choice", "answer": "形容认真"}, "形容认真")
+        self.assertTrue(choice["correct"])
+        revealed = grade_card({"question_type": "char_judge", "answer": "对"}, "", reveal=True)
+        self.assertFalse(revealed["correct"])
 
 
 class Sm2Tests(unittest.TestCase):
@@ -84,6 +109,8 @@ class CardTests(unittest.TestCase):
         self.assertIsNone(validate_card("saying", "俗语", "人心齐，泰山移。"))
         self.assertIsNotNone(validate_card("saying", "俗语", "字" * 41))
         self.assertIsNone(validate_card("sentence", "句子", "风，是大自然的音乐家。"))
+        self.assertIsNone(validate_card("idiom", "写法", "对", "char_judge", "守株待兔"))
+        self.assertIsNone(validate_card("idiom", "意思", "做事很认真", "meaning_choice", "守株待兔"))
 
     def test_csv_import(self):
         parsed = parse_import(
@@ -148,9 +175,10 @@ class Grade3aTests(unittest.TestCase):
         self.assertGreater(len(original), 200)
         pack = load_pack(spec)
         self.assertIn("日积月累", pack["original"])
-        self.assertEqual(len(pack["points"]), 40)
+        self.assertEqual(len(spec["points"]), 40)
+        self.assertGreaterEqual(len(pack["points"]), 40)
         parsed = parse_import(dump_pack(pack))
-        self.assertEqual(len(parsed["ok"]), 40)
+        self.assertEqual(len(parsed["ok"]), len(pack["points"]))
         self.assertEqual(parsed["ok"][0]["key"], pack["points"][0]["key"])
 
         keys = []
@@ -160,17 +188,21 @@ class Grade3aTests(unittest.TestCase):
         self.assertTrue(is_grade_pack("grade3-shang"))
         self.assertFalse(is_grade_pack("elementary-idioms"))
         idioms = load_pack(find_pack("elementary-idioms"))
-        self.assertGreaterEqual(len(idioms["points"]), 1900, "elementary-idioms")
+        recite = recite_points(idioms["points"])
+        self.assertGreaterEqual(len(recite), 1900, "elementary-idioms")
+        self.assertGreaterEqual(len({point.get("entry_key") for point in idioms["points"]}), 1900)
         self.assertTrue(any(point["kind"] == "idiom" for point in idioms["points"]))
-        by_answer = {point["answer"]: point for point in idioms["points"]}
-        self.assertEqual(by_answer["山清水秀"]["grade"], "一年级上")
-        self.assertIn("课文", by_answer["山清水秀"]["source"])
-        self.assertEqual(by_answer["春回大地"]["grade"], "一年级下")
-        self.assertIn("日积月累", by_answer["春回大地"]["source"])
-        self.assertEqual(by_answer["狐假虎威"]["grade"], "二年级上")
-        self.assertEqual(by_answer["自言自语"]["grade"], "一年级上")
-        self.assertIn("二年级下册", by_answer["自言自语"]["source"])
-        self.assertGreaterEqual(sum(1 for point in idioms["points"] if point.get("grade")), 240)
+        by_lemma = points_by_lemma(idioms["points"])
+        self.assertEqual(by_lemma["山清水秀"]["grade"], "一年级上")
+        self.assertIn("课文", by_lemma["山清水秀"]["source"])
+        self.assertEqual(by_lemma["春回大地"]["grade"], "一年级下")
+        self.assertIn("日积月累", by_lemma["春回大地"]["source"])
+        self.assertEqual(by_lemma["狐假虎威"]["grade"], "二年级上")
+        self.assertEqual(by_lemma["自言自语"]["grade"], "一年级上")
+        self.assertIn("二年级下册", by_lemma["自言自语"]["source"])
+        sample = [point for point in idioms["points"] if (point.get("lemma") or "") == "山清水秀"]
+        self.assertEqual({point.get("question_type") for point in sample}, {"recite", "char_judge", "meaning_choice"})
+        self.assertGreaterEqual(sum(1 for point in recite if point.get("grade")), 240)
         self.assertIn("日积月累", idioms["original"])
         self.assertIn("课文成语", idioms["original"])
         for spec in GRADE_PACKS:
@@ -179,7 +211,13 @@ class Grade3aTests(unittest.TestCase):
             self.assertGreater(len(loaded["points"]), 15, spec["slug"])
             keys.extend(point["key"] for point in loaded["points"])
             for point in loaded["points"]:
-                error = validate_card(point["kind"], point["prompt"], point["answer"])
+                error = validate_card(
+                    point["kind"],
+                    point["prompt"],
+                    point["answer"],
+                    point.get("question_type"),
+                    point.get("lemma"),
+                )
                 self.assertIsNone(error, point["key"] + " " + str(error))
         keys.extend(point["key"] for point in idioms["points"])
         self.assertEqual(len(keys), len(set(keys)))
@@ -197,11 +235,11 @@ class Grade3aTests(unittest.TestCase):
         self.assertGreaterEqual(len(set(expected)), 240)
 
         idioms = load_pack(find_pack("elementary-idioms"))
-        by_answer = {point["answer"]: point for point in idioms["points"]}
-        missing = [word for word in expected if word not in by_answer]
+        by_lemma = points_by_lemma(idioms["points"])
+        missing = [word for word in expected if word not in by_lemma]
         self.assertEqual(missing, [], "missing textbook idioms")
-        self.assertEqual(by_answer["不可思议"]["grade"], "六年级下")
-        self.assertEqual(by_answer["安居乐业"]["grade"], "二年级上")
+        self.assertEqual(by_lemma["不可思议"]["grade"], "六年级下")
+        self.assertEqual(by_lemma["安居乐业"]["grade"], "二年级上")
         printable = Path(raw_root() / "小学成语.md").read_text(encoding="utf-8")
         self.assertIn("山清水秀、自言自语", printable)
         self.assertIn("无成语", printable)
@@ -261,48 +299,48 @@ class Grade3aTests(unittest.TestCase):
 
             def execute(self, sql, args=None):
                 text = " ".join(sql.split())
+                args = args or ()
+                if "knowledge_entry" in text:
+                    self.result = None
+                    return
                 if "WHERE point_key" in text and text.strip().startswith("SELECT"):
                     self.result = next((row for row in self.rows.values() if row["point_key"] == args[0]), None)
                 elif "WHERE prompt" in text:
+                    qtype = args[2] if len(args) > 2 else "dictation"
                     self.result = next(
-                        (row for row in self.rows.values() if row["prompt"] == args[0] and row["answer"] == args[1]),
+                        (
+                            row
+                            for row in self.rows.values()
+                            if row["prompt"] == args[0]
+                            and row["answer"] == args[1]
+                            and (row.get("question_type") or "dictation") == qtype
+                        ),
                         None,
                     )
                 elif text.strip().startswith("UPDATE"):
                     row = self.rows[args[-1]]
-                    row.update(
-                        {
-                            "kind": args[0],
-                            "level": args[1],
-                            "grade": args[2],
-                            "prompt": args[3],
-                            "answer": args[4],
-                            "tags": args[5],
-                            "source": args[6],
-                            "source_resource_id": args[7],
-                            "point_key": args[8],
-                            "group_key": args[9],
-                            "sub_group_key": args[10],
-                        }
-                    )
+                    keys = [
+                        "kind", "level", "grade", "prompt", "answer", "tags", "source",
+                        "source_resource_id", "point_key", "group_key", "sub_group_key",
+                        "entry_key", "lemma", "question_type", "audience", "options",
+                    ]
+                    for index, key in enumerate(keys):
+                        if index < len(args) - 1:
+                            row[key] = args[index]
                     self.result = {"id": row["id"]}
                 elif text.strip().startswith("INSERT"):
                     point_id = self.next_id
                     self.next_id += 1
-                    self.rows[point_id] = {
-                        "id": point_id,
-                        "kind": args[0],
-                        "level": args[1],
-                        "grade": args[2],
-                        "prompt": args[3],
-                        "answer": args[4],
-                        "tags": args[5],
-                        "source": args[6],
-                        "source_resource_id": args[7],
-                        "point_key": args[8],
-                        "group_key": args[9],
-                        "sub_group_key": args[10],
-                    }
+                    keys = [
+                        "kind", "level", "grade", "prompt", "answer", "tags", "source",
+                        "source_resource_id", "point_key", "group_key", "sub_group_key",
+                        "entry_key", "lemma", "question_type", "audience", "options",
+                    ]
+                    row = {"id": point_id}
+                    for index, key in enumerate(keys):
+                        if index < len(args):
+                            row[key] = args[index]
+                    self.rows[point_id] = row
                     self.result = {"id": point_id}
 
             def fetchone(self):
@@ -361,7 +399,8 @@ class Grade3aTests(unittest.TestCase):
         if json_path.is_file():
             stored = json.loads(json_path.read_text(encoding="utf-8"))
             loaded = load_pack(spec)
-            self.assertEqual(loaded["version"], stored.get("version") or loaded["version"])
+            stored_ver = stored.get("version") or loaded["version"]
+            self.assertIn(loaded["version"], {stored_ver, stored_ver + 1})
 
 
 class GroupTests(unittest.TestCase):
@@ -379,13 +418,13 @@ class GroupTests(unittest.TestCase):
             for point in pack["points"]
             if point["source"].endswith("语文园地七") and point["kind"] == "idiom"
         ]
-        self.assertEqual(len(culture), 4)
-        self.assertEqual(len(art), 12)
-        self.assertEqual(len({point["group_key"] for point in culture}), 1)
-        self.assertEqual(len({point["group_key"] for point in art}), 1)
-        self.assertNotEqual(culture[0]["group_key"], art[0]["group_key"])
+        self.assertEqual(len(recite_points(culture)), 4)
+        self.assertEqual(len(recite_points(art)), 12)
+        self.assertGreaterEqual(len({point["group_key"] for point in culture}), 4)
+        self.assertGreaterEqual(len({point["group_key"] for point in art}), 12)
         poem = next(point for point in pack["points"] if point["kind"] == "poem")
         self.assertEqual(poem["group_key"], poem["key"])
+        self.assertEqual(poem["entry_key"], poem["key"])
 
     def test_shared_source_splits_by_theme(self):
         from app.materials import find_pack, load_pack
@@ -393,10 +432,10 @@ class GroupTests(unittest.TestCase):
         pack = load_pack(find_pack("grade3-xia"))
         yuyan = [point for point in pack["points"] if point["tags"] == "成语;寓言"]
         bazi = [point for point in pack["points"] if point["tags"] == "成语;八字"]
-        self.assertGreaterEqual(len(yuyan), 2)
-        self.assertGreaterEqual(len(bazi), 2)
-        self.assertEqual(len({point["group_key"] for point in yuyan}), 1)
-        self.assertEqual(len({point["group_key"] for point in bazi}), 1)
+        self.assertGreaterEqual(len(recite_points(yuyan)), 2)
+        self.assertGreaterEqual(len(recite_points(bazi)), 2)
+        self.assertGreaterEqual(len({point["group_key"] for point in yuyan}), 2)
+        self.assertGreaterEqual(len({point["group_key"] for point in bazi}), 2)
         self.assertNotEqual(yuyan[0]["group_key"], bazi[0]["group_key"])
 
     def test_explicit_group_and_citation_source(self):
@@ -422,7 +461,8 @@ class GroupTests(unittest.TestCase):
                 "source": "部编一年级下册·语文园地七",
             }
         )
-        self.assertEqual(left["group_key"], right["group_key"])
+        self.assertNotEqual(left["group_key"], right["group_key"])
+        self.assertEqual(left["entry_key"], left["group_key"])
         custom = fill_group_fields(
             {
                 "key": "c",
@@ -436,8 +476,236 @@ class GroupTests(unittest.TestCase):
                 "sub_group": "g2-a",
             }
         )
-        self.assertEqual(custom["group_key"], "g1-custom")
+        self.assertEqual(custom["group_key"], custom["entry_key"])
+        self.assertEqual(custom["entry_key"], "idiom:高山流水")
         self.assertEqual(custom["sub_group_key"], "g2-a")
+
+
+class EntryCardTests(unittest.TestCase):
+    def test_idiom_entry_emits_three_cards(self):
+        from app.entries import encode_options, fill_entry_fields, make_char_judge_card, make_meaning_card, meaning_hint, parse_options
+
+        base = fill_entry_fields(
+            {
+                "key": "idiom-tb-0001",
+                "kind": "idiom",
+                "level": "L1",
+                "grade": "一年级上",
+                "prompt": "形容做事认真（四字）",
+                "answer": "一丝不苟",
+                "tags": "成语;品质",
+                "source": "测试",
+                "lemma": "一丝不苟",
+                "question_type": "recite",
+                "audience": "all",
+            }
+        )
+        pool = [meaning_hint(base), "景色很美丽", "形容心情不好", "做事很认真"]
+        judge = make_char_judge_card(base)
+        meaning = make_meaning_card(base, pool)
+        self.assertEqual(base["entry_key"], "idiom:一丝不苟")
+        self.assertEqual(base["group_key"], judge["group_key"])
+        self.assertEqual(meaning["entry_key"], base["entry_key"])
+        self.assertEqual(len({base["key"], judge["key"], meaning["key"]}), 3)
+        self.assertEqual(judge["audience"], "lower")
+        self.assertEqual(meaning["audience"], "upper")
+        self.assertIn(judge["answer"], {"对", "错"})
+        options = parse_options(meaning.get("options") or encode_options(meaning.get("options")))
+        self.assertIn("choices", options)
+        self.assertEqual(len(options["choices"]), 4)
+
+    def test_expand_adds_judge_for_short_zi_not_idiom(self):
+        from app.entries import maybe_expand_pack_cards
+
+        expanded = maybe_expand_pack_cards(
+            [
+                {"key": "z1", "kind": "zi", "level": "L1", "prompt": "写", "answer": "己"},
+                {"key": "i1", "kind": "idiom", "level": "L1", "prompt": "春天（四字）", "answer": "春回大地"},
+                {"key": "p1", "kind": "poem", "level": "L1", "prompt": "静夜思", "answer": "床前明月光"},
+            ]
+        )
+        types = {(item["key"], item.get("question_type")) for item in expanded}
+        self.assertIn(("z1", "dictation"), types)
+        self.assertIn(("z1:char_judge", "char_judge"), types)
+        self.assertIn(("i1", "recite"), types)
+        self.assertFalse(any(item["key"].startswith("i1:") for item in expanded))
+        self.assertEqual(next(item for item in expanded if item["key"] == "p1")["question_type"], "recite")
+
+    def test_audiences_for_grades(self):
+        from app.entries import audiences_for_grades
+
+        self.assertEqual(audiences_for_grades(["一年级上"]), {"all", "lower"})
+        self.assertEqual(audiences_for_grades(["五年级下"]), {"all", "upper"})
+        self.assertEqual(audiences_for_grades(["三年级上"]), {"all", "lower", "upper"})
+        self.assertIsNone(audiences_for_grades([]))
+
+    def test_upsert_allows_second_card_same_lemma(self):
+        from app.entries import fill_entry_fields, make_char_judge_card
+        from app.materials import upsert_published
+
+        class FakeCur:
+            def __init__(self):
+                self.rows = {}
+                self.next_id = 1
+                self.result = None
+
+            def execute(self, sql, args=None):
+                text = " ".join(sql.split())
+                args = args or ()
+                if "knowledge_entry" in text:
+                    self.result = None
+                    return
+                if "WHERE point_key" in text and text.strip().startswith("SELECT"):
+                    self.result = next((row for row in self.rows.values() if row.get("point_key") == args[0]), None)
+                elif "WHERE prompt" in text:
+                    qtype = args[2] if len(args) > 2 else "dictation"
+                    self.result = next(
+                        (
+                            row
+                            for row in self.rows.values()
+                            if row["prompt"] == args[0]
+                            and row["answer"] == args[1]
+                            and (row.get("question_type") or "dictation") == qtype
+                        ),
+                        None,
+                    )
+                elif text.strip().startswith("INSERT"):
+                    point_id = self.next_id
+                    self.next_id += 1
+                    keys = [
+                        "kind", "level", "grade", "prompt", "answer", "tags", "source",
+                        "source_resource_id", "point_key", "group_key", "sub_group_key",
+                        "entry_key", "lemma", "question_type", "audience", "options",
+                    ]
+                    row = {"id": point_id}
+                    for index, key in enumerate(keys):
+                        if index < len(args):
+                            row[key] = args[index]
+                    self.rows[point_id] = row
+                    self.result = {"id": point_id}
+
+            def fetchone(self):
+                return self.result
+
+        cur = FakeCur()
+        base = fill_entry_fields(
+            {
+                "key": "idiom-same",
+                "kind": "idiom",
+                "level": "L1",
+                "grade": "一年级上",
+                "prompt": "形容认真（四字）",
+                "answer": "一丝不苟",
+                "tags": "成语",
+                "source": "测试",
+                "question_type": "recite",
+            }
+        )
+        first_id, status = upsert_published(cur, base, 1)
+        self.assertEqual(status, "inserted")
+        judge = make_char_judge_card(base)
+        second_id, status = upsert_published(cur, judge, 1)
+        self.assertEqual(status, "inserted")
+        self.assertNotEqual(first_id, second_id)
+        self.assertEqual(len(cur.rows), 2)
+        self.assertEqual(cur.rows[first_id]["entry_key"], cur.rows[second_id]["entry_key"])
+
+    def test_upsert_entry_merges_grades_and_levels(self):
+        from app.entries import fill_entry_fields
+        from app.materials import upsert_entry
+
+        class FakeCur:
+            def __init__(self):
+                self.entries = {}
+                self.grades = set()
+                self.levels = set()
+                self.result = None
+
+            def execute(self, sql, args=None):
+                text = " ".join(sql.split())
+                args = args or ()
+                if text.strip().startswith("SELECT") and "FROM knowledge_entry" in text:
+                    self.result = self.entries.get(args[0])
+                    return
+                if "INSERT INTO knowledge_entry " in text:
+                    row = {
+                        "entry_key": args[0],
+                        "kind": args[1],
+                        "lemma": args[2],
+                        "grade": args[3],
+                        "grades": args[4],
+                        "levels": args[5],
+                        "tags": args[6],
+                        "source": args[7],
+                    }
+                    self.entries[args[0]] = row
+                    self.result = None
+                    return
+                if "INSERT INTO knowledge_entry_grade" in text:
+                    self.grades.add((args[0], args[1]))
+                    self.result = None
+                    return
+                if "INSERT INTO knowledge_entry_level" in text:
+                    self.levels.add((args[0], args[1]))
+                    self.result = None
+
+            def fetchone(self):
+                return self.result
+
+        cur = FakeCur()
+        first = fill_entry_fields(
+            {
+                "kind": "idiom",
+                "level": "L1",
+                "grade": "一年级上",
+                "prompt": "一年级",
+                "answer": "春回大地",
+                "lemma": "春回大地",
+                "tags": "成语",
+                "source": "一年级上",
+                "question_type": "recite",
+            }
+        )
+        second = fill_entry_fields(
+            {
+                "kind": "idiom",
+                "level": "L3",
+                "grade": "二年级上",
+                "prompt": "二年级",
+                "answer": "春回大地",
+                "lemma": "春回大地",
+                "tags": "成语",
+                "source": "二年级上",
+                "question_type": "recite",
+            }
+        )
+        upsert_entry(cur, first)
+        upsert_entry(cur, second)
+        row = cur.entries[first["entry_key"]]
+        self.assertEqual(row["lemma"], "春回大地")
+        self.assertIn("一年级上", row["grades"])
+        self.assertIn("二年级上", row["grades"])
+        self.assertIn("L1", row["levels"])
+        self.assertIn("L3", row["levels"])
+        self.assertEqual(row["grade"], "一年级上")
+        self.assertIn((first["entry_key"], "一年级上"), cur.grades)
+        self.assertIn((first["entry_key"], "二年级上"), cur.grades)
+
+    def test_pick_course_cards_keeps_one_per_entry_type(self):
+        from app.entries import pick_course_cards
+
+        rows = [
+            {"id": 1, "entry_key": "idiom:春回大地", "question_type": "recite", "grade": "一年级下", "level": "L1", "kind": "idiom"},
+            {"id": 2, "entry_key": "idiom:春回大地", "question_type": "recite", "grade": "二年级上", "level": "L3", "kind": "idiom"},
+            {"id": 3, "entry_key": "idiom:春回大地", "question_type": "char_judge", "grade": "一年级下", "level": "L1", "kind": "idiom"},
+            {"id": 4, "entry_key": "idiom:狐假虎威", "question_type": "recite", "grade": "二年级上", "level": "L1", "kind": "idiom"},
+        ]
+        picked = pick_course_cards(rows, ["二年级上"])
+        by_key = {(row["entry_key"], row["question_type"]): row["id"] for row in picked}
+        self.assertEqual(by_key[("idiom:春回大地", "recite")], 2)
+        self.assertEqual(by_key[("idiom:春回大地", "char_judge")], 3)
+        self.assertEqual(by_key[("idiom:狐假虎威", "recite")], 4)
+        self.assertEqual(len(picked), 3)
 
     def test_plan_today_keeps_whole_group(self):
         def word(point_id, group, last=None, due=None):
@@ -476,6 +744,9 @@ class EnergyTests(unittest.TestCase):
         self.assertEqual(point_energy({"kind": "zi", "answer": "己"}), 1)
         self.assertEqual(point_energy({"kind": "idiom", "answer": "春风", "tags": "词语"}), 2)
         self.assertEqual(point_energy({"kind": "idiom", "answer": "高山流水", "tags": "成语;艺术"}), 4)
+        self.assertEqual(point_energy({"kind": "idiom", "answer": "高山流水", "tags": "成语;艺术", "question_type": "recite"}), 2)
+        self.assertEqual(point_energy({"kind": "idiom", "question_type": "char_judge", "answer": "对"}), 2)
+        self.assertEqual(point_energy({"kind": "idiom", "question_type": "meaning_choice", "answer": "形容很好"}), 4)
         self.assertEqual(point_energy({"kind": "poem", "answer": "床前明月光，疑是地上霜。举头望明月，低头思故乡。"}), 16)
         self.assertEqual(point_energy({"kind": "wenyan", "answer": "宋人有耕者。" * 20}), 64)
         self.assertEqual(point_energy({"kind": "idiom", "answer": "高山流水", "tags": "成语", "energy": 8}), 8)

@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from .cards import fill_group_fields, parse_import
+from .entries import GRADE_ORDER, LEVEL_ORDER, join_labels, maybe_expand_pack_cards, merge_labels
 from .grade3a_points import GRADE3A_POINTS
 from .high_grade_points import (
     GRADE3X_POINTS,
@@ -208,6 +209,11 @@ def pack_fingerprint(pack):
                 "answer": str(item.get("answer") or ""),
                 "tags": str(item.get("tags") or ""),
                 "source": str(item.get("source") or ""),
+                "entry_key": str(item.get("entry_key") or ""),
+                "lemma": str(item.get("lemma") or ""),
+                "question_type": str(item.get("question_type") or ""),
+                "audience": str(item.get("audience") or ""),
+                "options": str(item.get("options") or ""),
             }
             for item in (pack.get("points") or [])
         ],
@@ -253,7 +259,7 @@ def read_pack_file(path, pack=None):
         "slug": str(data.get("slug") or spec["slug"]),
         "title": str(data.get("title") or spec["title"]),
         "original": original,
-        "points": parsed["ok"],
+        "points": maybe_expand_pack_cards(parsed["ok"]),
         "skip": parsed["skip"],
         "version": parse_version(data.get("version")),
     }
@@ -283,7 +289,7 @@ def load_pack(pack=None):
         "slug": spec["slug"],
         "title": spec["title"],
         "original": original,
-        "points": [fill_group_fields(dict(item)) for item in spec["points"]],
+        "points": maybe_expand_pack_cards([fill_group_fields(dict(item)) for item in spec["points"]]),
         "skip": 0,
     }
     result["contentHash"] = pack_fingerprint(result)
@@ -318,7 +324,9 @@ def write_official_files(pack, spec=None):
     try:
         raw_dir.mkdir(parents=True, exist_ok=True)
         if not spec.get("source_json"):
-            (raw_dir / spec["json_name"]).write_text(dump_pack(pack), encoding="utf-8")
+            raw_json = raw_dir / spec["json_name"]
+            if not raw_json.is_file():
+                raw_json.write_text(dump_pack(pack), encoding="utf-8")
         if pack.get("original") and not (raw_dir / spec["md_name"]).is_file():
             (raw_dir / spec["md_name"]).write_text(pack["original"], encoding="utf-8")
         bundled = bundled_md(spec)
@@ -384,12 +392,77 @@ def point_unchanged(row, point, resource_id, key):
         and (row.get("point_key") or "") == key
         and (row.get("group_key") or "") == (point.get("group_key") or "")
         and (row.get("sub_group_key") or "") == (point.get("sub_group_key") or "")
+        and (row.get("entry_key") or "") == (point.get("entry_key") or "")
+        and (row.get("lemma") or "") == (point.get("lemma") or "")
+        and (row.get("question_type") or "dictation") == (point.get("question_type") or "dictation")
+        and (row.get("audience") or "all") == (point.get("audience") or "all")
+        and (row.get("options") or "") == (point.get("options") or "")
         and (row.get("source_resource_id") == resource_id or resource_id is None)
     )
 
 
+def upsert_entry(cur, point):
+    key = str(point.get("entry_key") or "").strip()
+    if not key:
+        return
+    lemma = str(point.get("lemma") or "").strip()
+    cur.execute("SELECT * FROM knowledge_entry WHERE entry_key = %s", (key,))
+    existing = cur.fetchone() or {}
+    grades = merge_labels(existing.get("grades") or existing.get("grade"), point.get("grade"), GRADE_ORDER)
+    levels = merge_labels(existing.get("levels"), point.get("level"), LEVEL_ORDER)
+    sources = merge_labels(existing.get("source"), point.get("source"))
+    tags = merge_labels(existing.get("tags"), point.get("tags"))
+    kind = str(point.get("kind") or existing.get("kind") or "")
+    lemma = lemma or str(existing.get("lemma") or "")
+    primary_grade = grades[0] if grades else ""
+    cur.execute(
+        """
+        INSERT INTO knowledge_entry (entry_key, kind, lemma, grade, grades, levels, tags, source)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (entry_key) DO UPDATE SET
+            kind = EXCLUDED.kind,
+            lemma = CASE WHEN EXCLUDED.lemma <> '' THEN EXCLUDED.lemma ELSE knowledge_entry.lemma END,
+            grade = EXCLUDED.grade,
+            grades = EXCLUDED.grades,
+            levels = EXCLUDED.levels,
+            tags = EXCLUDED.tags,
+            source = EXCLUDED.source,
+            updated_at = NOW()
+        """,
+        (
+            key,
+            kind,
+            lemma,
+            primary_grade,
+            join_labels(grades),
+            join_labels(levels),
+            join_labels(tags),
+            join_labels(sources),
+        ),
+    )
+    for grade in grades:
+        cur.execute(
+            """
+            INSERT INTO knowledge_entry_grade (entry_key, grade)
+            VALUES (%s, %s)
+            ON CONFLICT (entry_key, grade) DO NOTHING
+            """,
+            (key, grade),
+        )
+    for level in levels:
+        cur.execute(
+            """
+            INSERT INTO knowledge_entry_level (entry_key, level)
+            VALUES (%s, %s)
+            ON CONFLICT (entry_key, level) DO NOTHING
+            """,
+            (key, level),
+        )
+
+
 def upsert_published(cur, point, resource_id=None, force=False):
     point = fill_group_fields(dict(point))
+    upsert_entry(cur, point)
     key = str(point.get("key") or "").strip()
     existing = None
     if key:
@@ -397,24 +470,13 @@ def upsert_published(cur, point, resource_id=None, force=False):
         existing = cur.fetchone()
     if not existing:
         cur.execute(
-            "SELECT * FROM knowledge_published WHERE prompt = %s AND answer = %s",
-            (point["prompt"], point["answer"]),
+            "SELECT * FROM knowledge_published WHERE prompt = %s AND answer = %s AND COALESCE(question_type, 'dictation') = %s",
+            (point["prompt"], point["answer"], point.get("question_type") or "dictation"),
         )
         existing = cur.fetchone()
         other_key = str((existing or {}).get("point_key") or "").strip()
         if existing and key and other_key and other_key != key:
             existing = None
-    if not existing and point.get("kind") == "idiom" and key:
-        cur.execute(
-            """
-            SELECT * FROM knowledge_published
-            WHERE kind = 'idiom' AND answer = %s AND point_key <> '' AND point_key <> %s
-            """,
-            (point["answer"], key),
-        )
-        other = cur.fetchone()
-        if other:
-            return other["id"], "unchanged"
     fields = (
         point["kind"],
         point["level"],
@@ -427,6 +489,11 @@ def upsert_published(cur, point, resource_id=None, force=False):
         key,
         point.get("group_key") or "",
         point.get("sub_group_key") or "",
+        point.get("entry_key") or "",
+        point.get("lemma") or "",
+        point.get("question_type") or "dictation",
+        point.get("audience") or "all",
+        point.get("options") or "",
     )
     if existing:
         if not force and point_unchanged(existing, point, resource_id, key):
@@ -435,7 +502,8 @@ def upsert_published(cur, point, resource_id=None, force=False):
             """
             UPDATE knowledge_published
             SET kind=%s, level=%s, grade=%s, prompt=%s, answer=%s, tags=%s, source=%s,
-                source_resource_id=%s, point_key=%s, group_key=%s, sub_group_key=%s, published_at=NOW()
+                source_resource_id=%s, point_key=%s, group_key=%s, sub_group_key=%s,
+                entry_key=%s, lemma=%s, question_type=%s, audience=%s, options=%s, published_at=NOW()
             WHERE id=%s
             """,
             fields + (existing["id"],),
@@ -445,8 +513,8 @@ def upsert_published(cur, point, resource_id=None, force=False):
         """
         INSERT INTO knowledge_published
             (kind, level, grade, prompt, answer, tags, source, source_resource_id, point_key,
-             group_key, sub_group_key)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             group_key, sub_group_key, entry_key, lemma, question_type, audience, options)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         fields,
@@ -470,12 +538,14 @@ def discard_matching_drafts(cur, points):
             """,
             (point.get("prompt") or "", point.get("answer") or ""),
         )
-        if point.get("kind") == "idiom" and point.get("answer"):
+        qtype = str(point.get("question_type") or "dictation")
+        if point.get("kind") == "idiom" and point.get("answer") and qtype in {"dictation", "recite"}:
             cur.execute(
                 """
                 UPDATE knowledge_draft
                 SET status = 'discarded'
                 WHERE status = 'draft' AND kind = 'idiom' AND answer = %s
+                  AND COALESCE(question_type, 'dictation') IN ('dictation', 'recite')
                 """,
                 (point["answer"],),
             )

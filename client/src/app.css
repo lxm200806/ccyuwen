@@ -279,7 +279,7 @@ td {
 
 .stats {
 	display: grid;
-	grid-template-columns: repeat(4, 1fr);
+	grid-template-columns: repeat(5, 1fr);
 	gap: 10px;
 }
 
@@ -397,6 +397,35 @@ td {
 .recite-optional summary {
 	cursor: pointer;
 	margin-bottom: 8px;
+}
+
+.judge-display {
+	margin: 12px 0;
+	padding: 16px 18px;
+	font-size: 28px;
+	letter-spacing: 0.12em;
+	text-align: center;
+	background: #fff;
+	border: 1px solid var(--line);
+	border-radius: 12px;
+}
+
+.choice-row,
+.choice-list {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 10px;
+	margin: 12px 0;
+}
+
+.choice-list {
+	flex-direction: column;
+}
+
+.choice-btn {
+	text-align: left;
+	white-space: normal;
+	line-height: 1.5;
 }
 
 .today-status {

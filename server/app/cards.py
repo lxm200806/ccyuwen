@@ -7,6 +7,13 @@ import re
 
 from .grade import normalize
 from . import sm2
+from .entries import (
+    encode_options,
+    fill_entry_fields,
+    lemma_of,
+    normalize_audience,
+    normalize_question_type,
+)
 
 KINDS = ("poem", "wenyan", "idiom", "saying", "sentence", "zi")
 LEVELS = ("L1", "L2", "L3", "L4")
@@ -86,11 +93,19 @@ def page_args(limit, offset):
     return min(max(safe_limit, 1), PAGE_MAX), max(safe_offset, 0)
 
 
-def validate_card(kind, prompt, answer):
+def validate_card(kind, prompt, answer, question_type="dictation", lemma=""):
     if kind not in KINDS:
         return "类型无效，仅支持 poem / wenyan / idiom / saying / sentence / zi"
+    qtype = normalize_question_type(question_type)
     if not str(prompt or "").strip() or not str(answer or "").strip():
         return "提示和答案必填"
+    if qtype == "char_judge":
+        compact = normalize(answer)
+        if compact not in {"对", "错"}:
+            return "字对错答案须为对或错"
+        return None
+    if qtype == "meaning_choice":
+        return None
     compact = normalize(answer)
     if kind == "zi" and len(compact) != 1:
         return "易错字答案必须是一个字"
@@ -119,7 +134,11 @@ def normalize_point(item):
     level = item.get("level") if item.get("level") in LEVELS else "L1"
     prompt = str(item.get("prompt") or "").strip()
     answer = str(item.get("answer") or "").strip()
-    error = validate_card(kind, prompt, answer)
+    qtype = normalize_question_type(item.get("question_type"))
+    lemma = str(item.get("lemma") or "").strip()
+    if not lemma:
+        lemma = lemma_of({"question_type": qtype, "answer": answer, "lemma": ""})
+    error = validate_card(kind, prompt, answer, qtype, lemma)
     if error:
         return None
     point = {
@@ -133,6 +152,11 @@ def normalize_point(item):
         "source": str(item.get("source") or "").strip(),
         "group": str(item.get("group") or "").strip(),
         "sub_group": str(item.get("sub_group") or "").strip(),
+        "entry_key": str(item.get("entry_key") or "").strip(),
+        "lemma": lemma,
+        "question_type": qtype,
+        "audience": normalize_audience(item.get("audience")),
+        "options": encode_options(item.get("options")),
     }
     return fill_group_fields(point)
 
@@ -218,10 +242,12 @@ def derive_group_key(point):
 def fill_group_fields(point):
     if not isinstance(point, dict):
         return point
+    point = fill_entry_fields(point)
     explicit_group = str(point.get("group") or "").strip()
     explicit_sub = str(point.get("sub_group") or "").strip()
-    point["group_key"] = explicit_group or derive_group_key(point)
-    point["sub_group_key"] = explicit_sub
+    entry_key = str(point.get("entry_key") or "").strip()
+    point["group_key"] = entry_key or explicit_group or derive_group_key(point)
+    point["sub_group_key"] = explicit_sub or str(point.get("question_type") or "")
     return point
 
 
@@ -262,9 +288,16 @@ def point_energy(point):
                 return value
         except (TypeError, ValueError):
             pass
+    qtype = normalize_question_type(point.get("question_type"))
     kind = point.get("kind")
+    if qtype == "char_judge":
+        return 2 if kind == "idiom" else 1
+    if qtype == "meaning_choice":
+        return 4 if kind == "idiom" else 2
     tags = str(point.get("tags") or "")
-    length = len(normalize(point.get("answer") or ""))
+    length = len(normalize(point.get("lemma") or point.get("answer") or ""))
+    if qtype == "recite" and kind == "idiom":
+        return 2
     if kind == "zi":
         return 1
     if kind == "idiom":

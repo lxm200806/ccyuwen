@@ -4,6 +4,7 @@ import os
 import re
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -39,8 +40,19 @@ from .cards import (
     point_energy,
     validate_card,
 )
+from .entries import (
+    AUDIENCE_LABEL,
+    AUDIENCES,
+    QUESTION_TYPE_LABEL,
+    QUESTION_TYPES,
+    audiences_for_grades,
+    normalize_audience,
+    normalize_question_type,
+    parse_options,
+    pick_course_cards,
+)
 from .db import connect, init_db
-from .grade import grade_answer
+from .grade import grade_answer, grade_card
 from .materials import (
     PACKS,
     attach_default_course,
@@ -51,6 +63,7 @@ from .materials import (
     summarize_sync,
     sync_all_official,
     sync_pack,
+    upsert_entry,
     upsert_published,
 )
 
@@ -134,9 +147,6 @@ def publish_draft_row(conn, draft_id):
         if existing:
             return existing
         raise HTTPException(status_code=404, detail="草稿不可发布")
-    error = validate_card(draft["kind"], draft["prompt"], draft["answer"])
-    if error:
-        raise HTTPException(status_code=400, detail=error)
     grouped = fill_group_fields(
         {
             "key": draft.get("point_key") or "",
@@ -147,71 +157,25 @@ def publish_draft_row(conn, draft_id):
             "answer": draft["answer"],
             "tags": draft.get("tags") or "",
             "source": draft.get("source") or "",
+            "entry_key": draft.get("entry_key") or "",
+            "lemma": draft.get("lemma") or "",
+            "question_type": draft.get("question_type") or "dictation",
+            "audience": draft.get("audience") or "all",
+            "options": draft.get("options") or "",
         }
     )
-    existing = None
-    key = str(grouped.get("key") or draft.get("point_key") or "").strip()
-    if key:
-        existing = conn.execute(
-            "SELECT id FROM knowledge_published WHERE point_key = %s",
-            (key,),
-        ).fetchone()
-    if not existing:
-        existing = conn.execute(
-            "SELECT id FROM knowledge_published WHERE prompt = %s AND answer = %s",
-            (draft["prompt"], draft["answer"]),
-        ).fetchone()
-    if existing:
-        conn.execute(
-            """
-            UPDATE knowledge_published
-            SET kind=%s, level=%s, grade=%s, prompt=%s, answer=%s, tags=%s, source=%s,
-                source_resource_id=%s, draft_id=%s, point_key=%s, group_key=%s, sub_group_key=%s,
-                published_at=NOW()
-            WHERE id=%s
-            """,
-            (
-                draft["kind"],
-                draft["level"],
-                grouped["grade"],
-                draft["prompt"],
-                draft["answer"],
-                draft["tags"],
-                draft["source"],
-                draft["source_resource_id"],
-                draft["id"],
-                key,
-                grouped["group_key"],
-                grouped["sub_group_key"],
-                existing["id"],
-            ),
-        )
-        published_id = existing["id"]
-    else:
-        published = conn.execute(
-            """
-            INSERT INTO knowledge_published
-                (kind, level, grade, prompt, answer, tags, source, source_resource_id, draft_id,
-                 point_key, group_key, sub_group_key)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            RETURNING id
-            """,
-            (
-                draft["kind"],
-                draft["level"],
-                grouped["grade"],
-                draft["prompt"],
-                draft["answer"],
-                draft["tags"],
-                draft["source"],
-                draft["source_resource_id"],
-                draft["id"],
-                key,
-                grouped["group_key"],
-                grouped["sub_group_key"],
-            ),
-        ).fetchone()
-        published_id = published["id"]
+    error = validate_card(
+        grouped["kind"],
+        grouped["prompt"],
+        grouped["answer"],
+        grouped.get("question_type"),
+        grouped.get("lemma"),
+    )
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+    with conn.cursor() as cur:
+        published_id, _status = upsert_published(cur, grouped, draft.get("source_resource_id"), force=True)
+        cur.execute("UPDATE knowledge_published SET draft_id = %s WHERE id = %s", (draft_id, published_id))
     conn.execute("UPDATE knowledge_draft SET status = 'published' WHERE id = %s", (draft_id,))
     with conn.cursor() as cur:
         attach_default_course(cur, [published_id])
@@ -227,6 +191,10 @@ class DraftPatch(BaseModel):
     tags: str | None = None
     source: str | None = None
     status: str | None = None
+    questionType: str | None = None
+    audience: str | None = None
+    lemma: str | None = None
+    options: Any = None
 
 
 class CourseBody(BaseModel):
@@ -283,6 +251,8 @@ def meta():
         "kinds": [{"id": key, "label": KIND_LABEL[key]} for key in KINDS],
         "levels": list(LEVELS),
         "grades": list(GRADES),
+        "questionTypes": [{"id": key, "label": QUESTION_TYPE_LABEL[key]} for key in QUESTION_TYPES],
+        "audiences": [{"id": key, "label": AUDIENCE_LABEL[key]} for key in AUDIENCES],
         "demoHints": demo_hints_enabled(),
         "studyModes": list(MODE_OPTIONS),
     }
@@ -299,7 +269,14 @@ def decorate_library_item(row, hide_answer=False):
     data["pointKey"] = data.get("point_key") or ""
     data["groupKey"] = data.get("group_key") or ""
     data["subGroupKey"] = data.get("sub_group_key") or ""
+    data["entryKey"] = data.get("entry_key") or ""
+    data["lemma"] = data.get("lemma") or ""
+    data["questionType"] = data.get("question_type") or "dictation"
+    data["audience"] = data.get("audience") or "all"
+    data["options"] = parse_options(data.get("options"))
     data["energy"] = point_energy(data)
+    data["entryGrades"] = data.get("entry_grades") or ""
+    data["entryLevels"] = data.get("entry_levels") or ""
     if hide_answer:
         data.pop("answer", None)
     return data
@@ -503,8 +480,9 @@ def import_drafts(body: ImportBody, user=Depends(require_admin)):
             row = conn.execute(
                 """
                 INSERT INTO knowledge_draft
-                    (kind, level, grade, prompt, answer, tags, source, source_resource_id, created_by, point_key)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    (kind, level, grade, prompt, answer, tags, source, source_resource_id, created_by, point_key,
+                     group_key, sub_group_key, entry_key, lemma, question_type, audience, options)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING *
                 """,
                 (
@@ -518,6 +496,13 @@ def import_drafts(body: ImportBody, user=Depends(require_admin)):
                     resource_id,
                     user["id"],
                     point.get("key") or "",
+                    point.get("group_key") or "",
+                    point.get("sub_group_key") or "",
+                    point.get("entry_key") or "",
+                    point.get("lemma") or "",
+                    point.get("question_type") or "dictation",
+                    point.get("audience") or "all",
+                    point.get("options") or "",
                 ),
             ).fetchone()
             inserted.append(row)
@@ -621,6 +606,8 @@ def library(
     grades: str | None = None,
     resourceId: str | None = None,
     unlinked: bool = False,
+    questionType: str | None = None,
+    audience: str | None = None,
     limit: int = 200,
     offset: int = 0,
     answers: bool = False,
@@ -629,14 +616,21 @@ def library(
     fields = (
         "k.id, k.kind, k.level, k.grade, k.prompt, k.answer, k.tags, k.source, "
         "k.point_key, k.group_key, k.sub_group_key, k.published_at, "
-        "k.source_resource_id, k.draft_id, "
-        "r.filename AS resource_filename, r.slug AS resource_slug"
+        "k.source_resource_id, k.draft_id, k.entry_key, k.lemma, k.question_type, k.audience, k.options, "
+        "r.filename AS resource_filename, r.slug AS resource_slug, "
+        "e.grades AS entry_grades, e.levels AS entry_levels"
     )
     hide_answer = user["role"] != "admin" and not answers
     kind_list = decode_filters(kinds, KINDS) if kinds else ([kind] if kind in KINDS else [])
     level_list = decode_filters(levels, LEVELS) if levels else ([level] if level in LEVELS else [])
-    grade_list = decode_filters(grades, GRADES) if grades else ([grade] if grade in GRADES else [])
-    where_sql = " FROM knowledge_published k LEFT JOIN resources r ON r.id = k.source_resource_id WHERE 1=1"
+    use_entry_grades = bool(grades)
+    grade_list = decode_filters(grades, GRADES) if use_entry_grades else ([grade] if grade in GRADES else [])
+    where_sql = (
+        " FROM knowledge_published k "
+        "LEFT JOIN resources r ON r.id = k.source_resource_id "
+        "LEFT JOIN knowledge_entry e ON e.entry_key = k.entry_key AND k.entry_key <> '' "
+        "WHERE 1=1"
+    )
     args = []
     if kind_list:
         where_sql += " AND k.kind = ANY(%s)"
@@ -644,9 +638,20 @@ def library(
     if level_list:
         where_sql += " AND k.level = ANY(%s)"
         args.append(level_list)
-    if grade_list:
-        where_sql += " AND k.grade = ANY(%s)"
-        args.append(grade_list)
+    where_sql, args = _append_grade_filter(where_sql, args, grade_list, via_entry=use_entry_grades)
+    if use_entry_grades:
+        wanted = audiences_for_grades(grade_list)
+        if wanted:
+            where_sql += " AND k.audience = ANY(%s)"
+            args.append(list(wanted))
+    qtype = normalize_question_type(questionType) if questionType else ""
+    if questionType and qtype in QUESTION_TYPES:
+        where_sql += " AND k.question_type = %s"
+        args.append(qtype)
+    aud = normalize_audience(audience) if audience else ""
+    if audience and aud in AUDIENCES:
+        where_sql += " AND k.audience = %s"
+        args.append(aud)
     resource_filter = parse_resource_filter(resourceId, unlinked)
     if resource_filter == 0:
         where_sql += " AND k.source_resource_id IS NULL"
@@ -656,14 +661,32 @@ def library(
     where_sql += pending_draft_exclusion("k")
     safe_limit, safe_offset = page_args(limit, offset)
     with connect() as conn:
-        total = conn.execute("SELECT COUNT(*) AS n" + where_sql, args).fetchone()["n"]
-        rows = conn.execute(
-            "SELECT " + fields + where_sql + " ORDER BY k.grade, k.kind, k.level, k.id LIMIT %s OFFSET %s",
-            args + [safe_limit, safe_offset],
-        ).fetchall()
+        if use_entry_grades:
+            rows = conn.execute(
+                "SELECT " + fields + where_sql + " ORDER BY k.grade, k.kind, k.entry_key, k.question_type, k.id",
+                args,
+            ).fetchall()
+            picked = pick_course_cards(rows, grade_list)
+            total = len(picked)
+            entry_count = _entry_count_from_rows(picked)
+            page = picked[safe_offset : safe_offset + safe_limit]
+        else:
+            total = conn.execute("SELECT COUNT(*) AS n" + where_sql, args).fetchone()["n"]
+            entry_count = conn.execute(
+                """
+                SELECT COUNT(DISTINCT CASE WHEN k.entry_key <> '' THEN k.entry_key ELSE 'id:' || k.id::text END) AS n
+                """
+                + where_sql,
+                args,
+            ).fetchone()["n"]
+            page = conn.execute(
+                "SELECT " + fields + where_sql + " ORDER BY k.grade, k.kind, k.entry_key, k.question_type, k.id LIMIT %s OFFSET %s",
+                args + [safe_limit, safe_offset],
+            ).fetchall()
     return {
-        "items": [decorate_library_item(row, hide_answer=hide_answer) for row in rows],
+        "items": [decorate_library_item(row, hide_answer=hide_answer) for row in page],
         "total": total,
+        "entryCount": entry_count,
         "limit": safe_limit,
         "offset": safe_offset,
     }
@@ -681,8 +704,18 @@ def patch_published(point_id: int, body: DraftPatch, user=Depends(require_admin)
         merged.update(payload)
         if merged["kind"] not in KINDS or merged["level"] not in LEVELS:
             raise HTTPException(status_code=400, detail="类型或级别无效")
+        if "questionType" in payload:
+            merged["question_type"] = payload["questionType"]
+        if "audience" in payload:
+            merged["audience"] = payload["audience"]
         merged["grade"] = normalize_grade(merged.get("grade"))
-        error = validate_card(merged["kind"], merged["prompt"], merged["answer"])
+        error = validate_card(
+            merged["kind"],
+            merged["prompt"],
+            merged["answer"],
+            merged.get("question_type") or merged.get("questionType"),
+            merged.get("lemma"),
+        )
         if error:
             raise HTTPException(status_code=400, detail=error)
         grouped = fill_group_fields(
@@ -695,13 +728,21 @@ def patch_published(point_id: int, body: DraftPatch, user=Depends(require_admin)
                 "answer": merged["answer"],
                 "tags": merged.get("tags") or "",
                 "source": merged.get("source") or "",
+                "entry_key": merged.get("entry_key") or merged.get("entryKey") or "",
+                "lemma": merged.get("lemma") or "",
+                "question_type": merged.get("question_type") or merged.get("questionType") or "dictation",
+                "audience": merged.get("audience") or "all",
+                "options": merged.get("options") or "",
             }
         )
+        with conn.cursor() as cur:
+            upsert_entry(cur, grouped)
         conn.execute(
             """
             UPDATE knowledge_published
             SET kind=%s, level=%s, grade=%s, prompt=%s, answer=%s, tags=%s, source=%s,
-                group_key=%s, sub_group_key=%s
+                group_key=%s, sub_group_key=%s, entry_key=%s, lemma=%s, question_type=%s,
+                audience=%s, options=%s
             WHERE id=%s
             """,
             (
@@ -714,6 +755,11 @@ def patch_published(point_id: int, body: DraftPatch, user=Depends(require_admin)
                 merged.get("source") or "",
                 grouped["group_key"],
                 grouped["sub_group_key"],
+                grouped.get("entry_key") or "",
+                grouped.get("lemma") or "",
+                grouped.get("question_type") or "dictation",
+                grouped.get("audience") or "all",
+                grouped.get("options") or "",
                 point_id,
             ),
         )
@@ -847,15 +893,36 @@ def _course_filters(course):
     return kinds, levels, grades
 
 
+def _append_grade_filter(sql, args, grades, alias="k", via_entry=False):
+    if not grades:
+        return sql, args
+    if via_entry:
+        sql += f"""
+         AND (
+            {alias}.grade = ANY(%s)
+            OR EXISTS (
+                SELECT 1 FROM knowledge_entry_grade g
+                WHERE g.entry_key = {alias}.entry_key
+                  AND {alias}.entry_key <> ''
+                  AND g.grade = ANY(%s)
+            )
+         )
+        """
+        return sql, args + [grades, grades]
+    return sql + f" AND {alias}.grade = ANY(%s)", args + [grades]
+
+
+def _entry_count_from_rows(rows):
+    keys = set()
+    for row in rows or []:
+        key = str(row.get("entry_key") or "").strip() or ("id:" + str(row.get("id") or ""))
+        keys.add(key)
+    return len(keys)
+
+
 def _matching_published_count(conn, course):
     kinds, levels, grades = _course_filters(course)
-    sql = "SELECT COUNT(*) AS n FROM knowledge_published k WHERE kind = ANY(%s) AND level = ANY(%s)"
-    args = [kinds, levels]
-    if grades:
-        sql += " AND grade = ANY(%s)"
-        args.append(grades)
-    sql += pending_draft_exclusion("k")
-    return conn.execute(sql, args).fetchone()["n"]
+    return len(_candidate_points(conn, kinds, levels, grades))
 
 
 def _sync_course_items(conn, course):
@@ -876,7 +943,8 @@ def _sync_course_items(conn, course):
         (course_id,),
     ).fetchone()["n"]
     added = 0
-    for point in _candidate_points(conn, kinds, levels, grades):
+    points = _candidate_points(conn, kinds, levels, grades)
+    for point in points:
         if point["id"] in existing:
             continue
         max_sort += 1
@@ -885,7 +953,8 @@ def _sync_course_items(conn, course):
             (course_id, point["id"], max_sort),
         )
         added += 1
-    return added
+    removed = _prune_duplicate_course_items(conn, course_id, points)
+    return added + removed
 
 
 def _ensure_default_synced(conn, course):
@@ -897,26 +966,64 @@ def _ensure_default_synced(conn, course):
     return course, added
 
 
+def _prune_duplicate_course_items(conn, course_id, points):
+    canonical = {}
+    for point in points or []:
+        key = (
+            str(point.get("entry_key") or "") or ("id:" + str(point.get("id") or "")),
+            normalize_question_type(point.get("question_type")),
+        )
+        canonical[key] = point["id"]
+    if not canonical:
+        return 0
+    extras = conn.execute(
+        """
+        SELECT i.point_id, p.entry_key, p.question_type
+        FROM course_items i
+        JOIN knowledge_published p ON p.id = i.point_id
+        WHERE i.course_id = %s
+        """,
+        (course_id,),
+    ).fetchall()
+    removed = 0
+    for row in extras:
+        key = (
+            str(row.get("entry_key") or "") or ("id:" + str(row.get("point_id") or "")),
+            normalize_question_type(row.get("question_type")),
+        )
+        keep_id = canonical.get(key)
+        if keep_id and row["point_id"] != keep_id:
+            conn.execute(
+                "DELETE FROM course_items WHERE course_id = %s AND point_id = %s",
+                (course_id, row["point_id"]),
+            )
+            removed += 1
+    return removed
+
+
 def _candidate_points(conn, kinds, levels, grades):
     sql = """
-        SELECT id, kind, level, grade, prompt, answer, tags, source, point_key, group_key
+        SELECT id, kind, level, grade, prompt, answer, tags, source, point_key, group_key,
+               entry_key, lemma, question_type, audience, options
         FROM knowledge_published k
         WHERE kind = ANY(%s) AND level = ANY(%s)
         """
     args = [kinds, levels]
-    if grades:
-        sql += " AND grade = ANY(%s)"
-        args.append(grades)
+    sql, args = _append_grade_filter(sql, args, grades, via_entry=True)
+    wanted = audiences_for_grades(grades)
+    if wanted:
+        sql += " AND audience = ANY(%s)"
+        args.append(list(wanted))
     sql += pending_draft_exclusion("k")
-    sql += " ORDER BY grade, kind, level, id"
-    return conn.execute(sql, args).fetchall()
+    sql += " ORDER BY grade, kind, entry_key, question_type, id"
+    return pick_course_cards(conn.execute(sql, args).fetchall(), grades)
 
 
 def _course_plan_points(conn, course_id):
     return conn.execute(
         """
         SELECT p.id, p.kind, p.level, p.grade, p.prompt, p.answer, p.tags, p.source,
-               p.point_key, p.group_key
+               p.point_key, p.group_key, p.entry_key, p.lemma, p.question_type, p.audience, p.options
         FROM course_items i
         JOIN knowledge_published p ON p.id = i.point_id
         WHERE i.course_id = %s
@@ -951,7 +1058,8 @@ def _load_today_points(conn, course_id, user_id):
     return conn.execute(
         """
         SELECT p.id, p.kind, p.level, p.grade, p.prompt, p.answer, p.tags, p.source,
-               p.point_key, p.group_key, p.sub_group_key,
+               p.point_key, p.group_key, p.sub_group_key, p.entry_key, p.lemma,
+               p.question_type, p.audience, p.options,
                s.n, s.ef, s.interval, s.due, s.lapses, s.last
         FROM course_items i
         JOIN knowledge_published p ON p.id = i.point_id
@@ -1104,9 +1212,9 @@ def today_queue(course_id: int, mode: str | None = None, user=Depends(current_us
     progress = build_progress(planned, logs, item_count=len(points))
     planned = apply_today_mode(planned, active)
     items = []
-    include_answer = active == "recite"
     hide_source = active == "test"
     for entry in flatten_today_groups(planned["groups"]):
+        qtype = entry["row"].get("question_type") or "dictation"
         extra = {
             "groupKey": entry["group_key"],
             "groupSize": entry["group_size"],
@@ -1121,9 +1229,15 @@ def today_queue(course_id: int, mode: str | None = None, user=Depends(current_us
             "cardTitle": entry["title"],
             "role": entry.get("role") or "new",
             "mode": active,
+            "entryKey": entry["row"].get("entry_key") or "",
+            "lemma": entry["row"].get("lemma") or "",
+            "questionType": qtype,
+            "audience": entry["row"].get("audience") or "all",
+            "options": parse_options(entry["row"].get("options")),
         }
-        if include_answer:
-            extra["answer"] = entry["row"].get("answer") or ""
+        show_answer = active == "recite" or (qtype == "recite" and active != "test")
+        if show_answer:
+            extra["answer"] = entry["row"].get("answer") or extra.get("lemma") or ""
             extra["lines"] = answer_lines(extra["answer"])
         item = serialize_point(entry["row"], extra)
         if hide_source:
@@ -1190,9 +1304,9 @@ def review_point(course_id: int, body: ReviewBody, user=Depends(current_user)):
             "lapses": point["lapses"],
         }
         if body.reveal:
-            result = grade_answer("", point["answer"])
+            result = grade_card(point, "", reveal=True)
         else:
-            result = grade_answer(body.answer, point["answer"])
+            result = grade_card(point, body.answer, reveal=False)
         outcome = review_outcome(mode, result, body.reveal)
         if not outcome["ok"]:
             raise HTTPException(status_code=400, detail=outcome["error"])
@@ -1253,11 +1367,19 @@ def course_stats(course_id: int, user=Depends(current_user)):
         _ensure_default_synced(conn, course)
         rows = conn.execute(
             """
-            SELECT p.id, p.kind, p.level, p.grade, p.prompt, p.source,
+            SELECT p.id, p.kind, p.level, p.grade, p.prompt, p.source, p.entry_key, p.lemma, p.question_type,
                    s.n, s.interval, s.due, s.lapses, s.last,
                    COALESCE(SUM(CASE WHEN l.is_new THEN 1 ELSE 0 END), 0) AS study_count,
                    COALESCE(SUM(CASE WHEN NOT l.is_new THEN 1 ELSE 0 END), 0) AS review_count,
-                   COALESCE(SUM(CASE WHEN l.correct THEN 0 ELSE 1 END), 0) AS error_count
+                   COALESCE(SUM(CASE WHEN l.correct THEN 0 ELSE 1 END), 0) AS error_count,
+                   COALESCE((
+                       SELECT COUNT(DISTINCT l2.course_id)
+                       FROM review_log l2
+                       JOIN knowledge_published p2 ON p2.id = l2.point_id
+                       WHERE l2.user_id = %s
+                         AND p.entry_key <> ''
+                         AND p2.entry_key = p.entry_key
+                   ), 0) AS pass_count
             FROM course_items i
             JOIN knowledge_published p ON p.id = i.point_id
             LEFT JOIN review_state s
@@ -1265,16 +1387,18 @@ def course_stats(course_id: int, user=Depends(current_user)):
             LEFT JOIN review_log l
                 ON l.point_id = p.id AND l.user_id = %s AND l.course_id = %s
             WHERE i.course_id = %s
-            GROUP BY p.id, p.kind, p.level, p.grade, p.prompt, p.source, s.n, s.interval, s.due, s.lapses, s.last, i.sort
+            GROUP BY p.id, p.kind, p.level, p.grade, p.prompt, p.source, p.entry_key, p.lemma, p.question_type,
+                     s.n, s.interval, s.due, s.lapses, s.last, i.sort
             ORDER BY i.sort, p.id
             """,
-            (user["id"], course_id, user["id"], course_id, course_id),
+            (user["id"], user["id"], course_id, user["id"], course_id, course_id),
         ).fetchall()
         points, logs, planned = _plan_course_today(conn, course, user["id"], today)
     items = []
     for row in rows:
         item = dict(row)
         item["mastered"] = sm2.is_mastered(row)
+        item["passCount"] = int(item.get("pass_count") or 0)
         items.append(item)
     mastery = mastery_counts(items)
     progress = build_progress(
@@ -1311,6 +1435,12 @@ def course_stats(course_id: int, user=Depends(current_user)):
 def library_coverage(user=Depends(current_user)):
     with connect() as conn:
         total = conn.execute("SELECT COUNT(*) AS n FROM knowledge_published").fetchone()["n"]
+        entry_count = conn.execute(
+            """
+            SELECT COUNT(DISTINCT CASE WHEN entry_key <> '' THEN entry_key ELSE 'id:' || id::text END) AS n
+            FROM knowledge_published
+            """
+        ).fetchone()["n"]
         in_course = conn.execute(
             """
             SELECT COUNT(DISTINCT i.point_id) AS n
@@ -1328,6 +1458,15 @@ def library_coverage(user=Depends(current_user)):
             """,
             (user["id"],),
         ).fetchone()["n"]
+        studied_entries = conn.execute(
+            """
+            SELECT COUNT(DISTINCT CASE WHEN p.entry_key <> '' THEN p.entry_key ELSE 'id:' || p.id::text END) AS n
+            FROM review_log l
+            JOIN knowledge_published p ON p.id = l.point_id
+            WHERE l.user_id = %s
+            """,
+            (user["id"],),
+        ).fetchone()["n"]
         mastered = conn.execute(
             """
             SELECT COUNT(DISTINCT point_id) AS n FROM review_state
@@ -1338,6 +1477,7 @@ def library_coverage(user=Depends(current_user)):
         by_kind = conn.execute(
             """
             SELECT p.kind, COUNT(DISTINCT p.id) AS total,
+                   COUNT(DISTINCT CASE WHEN p.entry_key <> '' THEN p.entry_key ELSE 'id:' || p.id::text END) AS entries,
                    COUNT(DISTINCT CASE WHEN c.user_id = %s THEN i.point_id END) AS in_course
             FROM knowledge_published p
             LEFT JOIN course_items i ON i.point_id = p.id
@@ -1350,6 +1490,7 @@ def library_coverage(user=Depends(current_user)):
         by_grade = conn.execute(
             """
             SELECT COALESCE(NULLIF(p.grade, ''), '未分年级') AS grade, COUNT(DISTINCT p.id) AS total,
+                   COUNT(DISTINCT CASE WHEN p.entry_key <> '' THEN p.entry_key ELSE 'id:' || p.id::text END) AS entries,
                    COUNT(DISTINCT CASE WHEN c.user_id = %s THEN i.point_id END) AS in_course
             FROM knowledge_published p
             LEFT JOIN course_items i ON i.point_id = p.id
@@ -1359,13 +1500,31 @@ def library_coverage(user=Depends(current_user)):
             """,
             (user["id"],),
         ).fetchall()
+        by_entry_grade = conn.execute(
+            """
+            SELECT g.grade,
+                   COUNT(DISTINCT g.entry_key) AS entries,
+                   COUNT(DISTINCT p.id) AS total,
+                   COUNT(DISTINCT CASE WHEN c.user_id = %s THEN i.point_id END) AS in_course
+            FROM knowledge_entry_grade g
+            LEFT JOIN knowledge_published p ON p.entry_key = g.entry_key
+            LEFT JOIN course_items i ON i.point_id = p.id
+            LEFT JOIN courses c ON c.id = i.course_id
+            GROUP BY g.grade
+            ORDER BY g.grade
+            """,
+            (user["id"],),
+        ).fetchall()
     return {
         "total": total,
+        "entryCount": entry_count,
         "inCourse": in_course,
         "studied": studied,
+        "studiedEntries": studied_entries,
         "mastered": mastered,
         "byKind": by_kind,
         "byGrade": by_grade,
+        "byEntryGrade": by_entry_grade,
     }
 
 
@@ -1383,6 +1542,10 @@ def serialize_point(point, extra=None):
         "pointKey": point.get("point_key") or "",
         "groupKey": point.get("group_key") or "",
         "subGroupKey": point.get("sub_group_key") or "",
+        "entryKey": point.get("entry_key") or "",
+        "lemma": point.get("lemma") or "",
+        "questionType": point.get("question_type") or "dictation",
+        "audience": point.get("audience") or "all",
         "energy": point_energy(point),
     }
     if extra:

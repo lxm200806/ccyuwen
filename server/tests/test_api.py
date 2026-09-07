@@ -220,6 +220,11 @@ class ApiTests(unittest.TestCase):
         coverage = self.client.get("/api/library/coverage", headers=self.kid)
         self.assertEqual(coverage.status_code, 200, coverage.text)
         self.assertEqual(coverage.json()["total"], published)
+        self.assertIn("entryCount", coverage.json())
+        self.assertIn("studiedEntries", coverage.json())
+        self.assertIn("byEntryGrade", coverage.json())
+        self.assertGreaterEqual(coverage.json()["entryCount"], 1)
+        self.assertLessEqual(coverage.json()["entryCount"], coverage.json()["total"])
         self.assertGreaterEqual(coverage.json()["inCourse"], visible)
         self.assertEqual(sum(row["total"] for row in coverage.json()["byKind"]), published)
         self.assertEqual(sum(row["total"] for row in coverage.json()["byGrade"]), published)
@@ -252,7 +257,9 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(library.status_code, 200, library.text)
         payload = library.json()
         self.assertIn("items", payload)
+        self.assertIn("entryCount", payload)
         self.assertTrue(payload["total"] >= 1)
+        self.assertGreaterEqual(payload["entryCount"], 1)
         self.assertTrue(all("answer" not in item for item in payload["items"]))
 
         catalog = self.client.get("/api/library?kind=zi&level=L4&answers=1", headers=self.kid)
@@ -283,7 +290,8 @@ class ApiTests(unittest.TestCase):
 
         today = self.client.get("/api/courses/" + str(course_id) + "/today", headers=self.kid)
         self.assertEqual(today.status_code, 200, today.text)
-        self.assertTrue(any(item["id"] == point_id for item in today.json()["items"]))
+        today_item = next(item for item in today.json()["items"] if item["id"] == point_id)
+        self.assertEqual(today_item.get("questionType"), "dictation")
         self.assertEqual(today.json().get("mode"), "learn")
         self.assertEqual(today.json().get("defaultMode"), "learn")
 
@@ -497,8 +505,11 @@ class ApiTests(unittest.TestCase):
 
         synced = self.client.post("/api/resources/" + str(json_id) + "/sync", headers=self.admin)
         self.assertEqual(synced.status_code, 200, synced.text)
-        self.assertEqual(synced.json()["ok"], 40)
-        self.assertEqual(synced.json()["inserted"] + synced.json()["updated"], 40)
+        self.assertGreaterEqual(synced.json()["ok"], 40)
+        self.assertGreaterEqual(
+            synced.json()["inserted"] + synced.json()["updated"] + synced.json().get("unchanged", 0),
+            40,
+        )
 
         grade1 = self.client.post("/api/resources/" + str(slugs["grade1-shang"]["id"]) + "/sync", headers=self.admin)
         self.assertEqual(grade1.status_code, 200, grade1.text)
@@ -613,6 +624,252 @@ class ApiTests(unittest.TestCase):
         self.assertTrue({item["id"] for item in batch.json()["items"]}.issubset(published_ids))
         leftover_prompt = "看拼音写字：pī（批量" + self.marker + "2）"
         self.assertFalse(any(item.get("prompt") == leftover_prompt for item in library.json()["items"]))
+
+    def test_multi_card_entry_audience_and_question_type(self):
+        import json
+
+        lemma = "接口成语"
+        key = "api-" + self.marker
+        pack = {
+            "points": [
+                {
+                    "key": key,
+                    "kind": "idiom",
+                    "level": "L4",
+                    "grade": "一年级上",
+                    "prompt": "形容接口练习（四字）",
+                    "answer": lemma,
+                    "tags": "成语;测试",
+                    "source": "接口测试",
+                    "lemma": lemma,
+                    "question_type": "recite",
+                    "audience": "all",
+                },
+                {
+                    "key": key + ":char_judge",
+                    "kind": "idiom",
+                    "level": "L4",
+                    "grade": "一年级上",
+                    "prompt": "下面的写法对不对？",
+                    "answer": "对",
+                    "tags": "成语;测试",
+                    "source": "接口测试",
+                    "lemma": lemma,
+                    "question_type": "char_judge",
+                    "audience": "lower",
+                    "options": {"display": lemma},
+                },
+                {
+                    "key": key + ":meaning_choice",
+                    "kind": "idiom",
+                    "level": "L4",
+                    "grade": "一年级上",
+                    "prompt": "「接口成语」的意思是？",
+                    "answer": "形容接口练习",
+                    "tags": "成语;测试",
+                    "source": "接口测试",
+                    "lemma": lemma,
+                    "question_type": "meaning_choice",
+                    "audience": "upper",
+                    "options": {
+                        "choices": ["形容接口练习", "景色很美丽", "做事很认真", "形容心情不好"]
+                    },
+                },
+            ]
+        }
+        imported = self.client.post(
+            "/api/drafts/import",
+            json={"text": json.dumps(pack, ensure_ascii=False)},
+            headers=self.admin,
+        )
+        self.assertEqual(imported.status_code, 200, imported.text)
+        self.assertEqual(imported.json()["ok"], 3)
+        draft_ids = [item["id"] for item in imported.json()["items"]]
+        published_ids = []
+        for draft_id in draft_ids:
+            published = self.client.post("/api/drafts/" + str(draft_id) + "/publish", headers=self.admin)
+            self.assertEqual(published.status_code, 200, published.text)
+            published_ids.append(published.json()["id"])
+
+        catalog = self.client.get(
+            "/api/library?kind=idiom&level=L4&grade=" + "一年级上" + "&answers=1&limit=500",
+            headers=self.admin,
+        )
+        self.assertEqual(catalog.status_code, 200, catalog.text)
+        ours = [
+            item
+            for item in catalog.json()["items"]
+            if item.get("id") in published_ids or item.get("lemma") == lemma
+        ]
+        self.assertEqual(len(ours), 3)
+        self.assertEqual({item.get("questionType") for item in ours}, {"recite", "char_judge", "meaning_choice"})
+        self.assertEqual(len({item.get("entryKey") for item in ours}), 1)
+
+        lower = self.client.post(
+            "/api/courses",
+            json={
+                "name": "接口课-低-" + self.marker,
+                "note": "一年级受众",
+                "kinds": ["idiom"],
+                "levels": ["L4"],
+                "grades": ["一年级上"],
+            },
+            headers=self.kid,
+        )
+        self.assertEqual(lower.status_code, 200, lower.text)
+        lower_id = lower.json()["id"]
+        today = self.client.get("/api/courses/" + str(lower_id) + "/today?mode=learn", headers=self.kid)
+        self.assertEqual(today.status_code, 200, today.text)
+        types = {item.get("questionType") for item in today.json()["items"] if item.get("id") in published_ids}
+        self.assertEqual(types, {"recite", "char_judge"})
+        recite = next(item for item in today.json()["items"] if item.get("id") in published_ids and item.get("questionType") == "recite")
+        self.assertTrue(recite.get("answer") or recite.get("lemma"))
+
+        mixed = self.client.post(
+            "/api/courses",
+            json={
+                "name": "接口课-混-" + self.marker,
+                "note": "低高年级都勾",
+                "kinds": ["idiom"],
+                "levels": ["L4"],
+                "grades": ["一年级上", "五年级上"],
+            },
+            headers=self.kid,
+        )
+        self.assertEqual(mixed.status_code, 200, mixed.text)
+        mixed_today = self.client.get(
+            "/api/courses/" + str(mixed.json()["id"]) + "/today?mode=learn",
+            headers=self.kid,
+        )
+        self.assertEqual(mixed_today.status_code, 200, mixed_today.text)
+        mixed_types = {
+            item.get("questionType")
+            for item in mixed_today.json()["items"]
+            if item.get("id") in published_ids
+        }
+        self.assertEqual(mixed_types, {"recite", "char_judge", "meaning_choice"})
+
+    def test_entry_grades_span_courses_without_duplicate_cards(self):
+        import json
+
+        glyphs = "甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳"
+        lemma = "跨" + "".join(glyphs[int(ch, 16)] for ch in self.marker[:3])
+        pack = {
+            "points": [
+                {
+                    "key": "cross-a-" + self.marker,
+                    "kind": "idiom",
+                    "level": "L4",
+                    "grade": "一年级上",
+                    "prompt": "一年级也有" + self.marker + "（四字）",
+                    "answer": lemma,
+                    "tags": "成语;测试",
+                    "source": "接口测试",
+                    "lemma": lemma,
+                    "question_type": "recite",
+                    "audience": "all",
+                },
+                {
+                    "key": "cross-b-" + self.marker,
+                    "kind": "idiom",
+                    "level": "L4",
+                    "grade": "二年级上",
+                    "prompt": "二年级也有" + self.marker + "（四字）",
+                    "answer": lemma,
+                    "tags": "成语;测试",
+                    "source": "接口测试",
+                    "lemma": lemma,
+                    "question_type": "recite",
+                    "audience": "all",
+                },
+            ]
+        }
+        imported = self.client.post(
+            "/api/drafts/import",
+            json={"text": json.dumps(pack, ensure_ascii=False)},
+            headers=self.admin,
+        )
+        self.assertEqual(imported.status_code, 200, imported.text)
+        self.assertEqual(imported.json()["ok"], 2)
+        published_ids = []
+        for item in imported.json()["items"]:
+            published = self.client.post("/api/drafts/" + str(item["id"]) + "/publish", headers=self.admin)
+            self.assertEqual(published.status_code, 200, published.text)
+            published_ids.append(published.json()["id"])
+
+        with connect() as conn:
+            entry = conn.execute(
+                "SELECT grades, levels FROM knowledge_entry WHERE entry_key = %s",
+                ("idiom:" + lemma,),
+            ).fetchone()
+            grades = {
+                row["grade"]
+                for row in conn.execute(
+                    "SELECT grade FROM knowledge_entry_grade WHERE entry_key = %s",
+                    ("idiom:" + lemma,),
+                ).fetchall()
+            }
+        self.assertIsNotNone(entry)
+        self.assertIn("一年级上", entry["grades"])
+        self.assertIn("二年级上", entry["grades"])
+        self.assertEqual(grades, {"一年级上", "二年级上"})
+
+        booklet = self.client.get(
+            "/api/library?kind=idiom&level=L4&grade=" + "二年级上" + "&answers=1&limit=500",
+            headers=self.admin,
+        )
+        self.assertEqual(booklet.status_code, 200, booklet.text)
+        booklet_ours = [item for item in booklet.json()["items"] if item.get("lemma") == lemma]
+        self.assertEqual(len(booklet_ours), 1)
+        self.assertEqual(booklet_ours[0]["grade"], "二年级上")
+
+        preview = self.client.get(
+            "/api/library?kind=idiom&level=L4&grades=" + "二年级上" + "&answers=1&limit=500",
+            headers=self.admin,
+        )
+        self.assertEqual(preview.status_code, 200, preview.text)
+        preview_ours = [item for item in preview.json()["items"] if item.get("lemma") == lemma]
+        self.assertEqual(len(preview_ours), 1)
+        self.assertIn("二年级上", preview_ours[0].get("entryGrades") or "")
+        self.assertIn("一年级上", preview_ours[0].get("entryGrades") or "")
+
+        grade1 = self.client.post(
+            "/api/courses",
+            json={
+                "name": "接口课-跨1-" + self.marker,
+                "note": "一年级再学",
+                "kinds": ["idiom"],
+                "levels": ["L4"],
+                "grades": ["一年级上"],
+            },
+            headers=self.kid,
+        )
+        self.assertEqual(grade1.status_code, 200, grade1.text)
+        stats1 = self.client.get("/api/courses/" + str(grade1.json()["id"]) + "/stats", headers=self.kid)
+        self.assertEqual(stats1.status_code, 200, stats1.text)
+        ours1 = [item for item in stats1.json()["items"] if item.get("id") in published_ids]
+        self.assertEqual(len(ours1), 1)
+        self.assertIn("一年级也有", ours1[0].get("prompt") or "")
+
+        grade2 = self.client.post(
+            "/api/courses",
+            json={
+                "name": "接口课-跨2-" + self.marker,
+                "note": "二年级再学",
+                "kinds": ["idiom"],
+                "levels": ["L4"],
+                "grades": ["二年级上"],
+            },
+            headers=self.kid,
+        )
+        self.assertEqual(grade2.status_code, 200, grade2.text)
+        stats2 = self.client.get("/api/courses/" + str(grade2.json()["id"]) + "/stats", headers=self.kid)
+        self.assertEqual(stats2.status_code, 200, stats2.text)
+        ours2 = [item for item in stats2.json()["items"] if item.get("id") in published_ids]
+        self.assertEqual(len(ours2), 1)
+        self.assertIn("二年级也有", ours2[0].get("prompt") or "")
+        self.assertNotEqual(ours1[0]["id"], ours2[0]["id"])
+        self.assertIn("passCount", ours1[0])
 
 
 if __name__ == "__main__":

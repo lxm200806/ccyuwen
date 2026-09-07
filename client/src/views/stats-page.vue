@@ -53,7 +53,7 @@
 					</div>
 				</div>
 				<h3>各条掌握</h3>
-				<p class="hint">间隔是下次再见到这题大约要隔几天。已掌握大约是隔三周或已连对多次。</p>
+				<p class="muted">间隔是下次再见到这题大约要隔几天。已掌握大约是隔三周或已连对多次。「学过几遍」是这个词条进过几门课并练过。</p>
 				<table v-if="items.length">
 					<thead>
 						<tr>
@@ -62,6 +62,7 @@
 							<th>学习</th>
 							<th>复习</th>
 							<th>错过</th>
+							<th>学过几遍</th>
 							<th>下次</th>
 							<th>状态</th>
 						</tr>
@@ -73,6 +74,7 @@
 							<td>{{ item.study_count }}</td>
 							<td>{{ item.review_count }}</td>
 							<td>{{ item.error_count }}</td>
+							<td>{{ item.passCount || item.pass_count || 0 }}</td>
 							<td>{{ item.interval || 0 }} 天</td>
 							<td>{{ item.last ? (item.mastered ? '已掌握' : '学习中') : '未学' }}</td>
 						</tr>
