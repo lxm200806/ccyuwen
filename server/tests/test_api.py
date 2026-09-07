@@ -907,16 +907,6 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(stranger.status_code, 200, stranger.text)
         other_headers = {"Authorization": "Bearer " + stranger.json()["token"]}
         other_id = stranger.json()["user"]["id"]
-        other_course = self.client.post(
-            "/api/courses",
-            json={"name": "接口课-他人-" + self.marker, "note": "", "kinds": ["zi"], "levels": ["L4"], "grades": ["三年级上"]},
-            headers=other_headers,
-        )
-        self.assertEqual(other_course.status_code, 200, other_course.text)
-        hidden = self.client.get("/api/courses/" + str(other_course.json()["id"]) + "/stats", headers=parent)
-        self.assertEqual(hidden.status_code, 403, hidden.text)
-        listed = self.client.get("/api/courses?studentId=" + str(other_id), headers=parent)
-        self.assertEqual(listed.status_code, 403, listed.text)
 
         prompt = "看拼音写字：cuò（家长" + self.marker + "）"
         imported = self.client.post(
@@ -940,6 +930,16 @@ class ApiTests(unittest.TestCase):
         )
         self.assertEqual(course.status_code, 200, course.text)
         course_id = course.json()["id"]
+        other_course = self.client.post(
+            "/api/courses",
+            json={"name": "接口课-他人-" + self.marker, "note": "", "kinds": ["zi"], "levels": ["L4"], "grades": ["三年级上"]},
+            headers=other_headers,
+        )
+        self.assertEqual(other_course.status_code, 200, other_course.text)
+        hidden = self.client.get("/api/courses/" + str(other_course.json()["id"]) + "/stats", headers=parent)
+        self.assertEqual(hidden.status_code, 403, hidden.text)
+        listed = self.client.get("/api/courses?studentId=" + str(other_id), headers=parent)
+        self.assertEqual(listed.status_code, 403, listed.text)
         wrong = self.client.post(
             "/api/courses/" + str(course_id) + "/review",
             json={"pointId": point_id, "answer": "措", "mode": "test"},
